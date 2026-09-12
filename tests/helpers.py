@@ -49,7 +49,8 @@ def cli(root, *args, expect=0):
     """Run the CLI as a subprocess (acceptance path) and return CompletedProcess."""
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS), *args],
-        cwd=str(root), capture_output=True, text=True, timeout=60,
+        cwd=str(root), capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=60,
     )
     if expect is not None:
         assert proc.returncode == expect, (
