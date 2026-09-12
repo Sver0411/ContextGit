@@ -1,5 +1,6 @@
 """Shared test helpers: temp git repositories built on demand."""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,12 +12,19 @@ SCRIPTS = REPO_ROOT / "scripts" / "context_git.py"
 
 
 def run_git(cwd, *args):
+    env = dict(os.environ)
+    env.update({
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t.co",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t.co",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_PAGER": "cat",
+    })
     subprocess.run(
         ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
-        env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.co",
-             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.co",
-             "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cwd), "PATH": "/usr/bin:/bin:/usr/local/bin",
-             "GIT_PAGER": "cat"},
+        env=env,
     )
 
 
