@@ -6,6 +6,8 @@ Mirrors the v1 acceptance checklist:
 """
 
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -168,6 +170,21 @@ class TestAcceptance(TempRepoTest):
         self.assertEqual(ctx["source_agent"]["name"], "codex")
         proc = cli(root, "resume", "--agent", "opencode")
         self.assertIn("OpenCode", proc.stdout)
+
+    def test_unicode_output_overrides_legacy_console_encoding(self):
+        root = self._demo_repo()
+        cli(root, "init")
+        cli(root, "snapshot", "--no-prompt", "--set", "pending=实现登录")
+        cli(root, "commit", "--no-prompt", "--set", "completed=实现登录")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent.parent /
+                                 "scripts" / "context_git.py"), "diff"],
+            cwd=str(root), capture_output=True, encoding="utf-8", env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("实现登录", proc.stdout)
 
     @staticmethod
     def _head(root):

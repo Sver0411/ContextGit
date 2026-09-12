@@ -580,7 +580,19 @@ def _add_snapshot_flags(p):
                    help="source agent name override (default: auto-detect)")
 
 
+def _configure_stdio():
+    """Make Unicode CLI output deterministic, including on Windows runners."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv=None):
+    _configure_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
