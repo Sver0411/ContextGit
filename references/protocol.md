@@ -1,6 +1,6 @@
 # UACP — Universal Agent Context Protocol
 
-Version 1.0 · status: stable for v1 implementations
+Version 1.0 · status: stable (implemented by Context Git 1.x and 2.x)
 
 UACP defines what an AI agent's *working state* looks like when written
 down, how those snapshots form a history, how two snapshots are compared,
@@ -142,10 +142,29 @@ and per-file fingerprint compare for important files.
 Contexts MAY declare `capabilities_required` (from the shared vocabulary:
 `filesystem shell git python node browser gui network image-generation
 subagents`). A resuming tool compares them against the target agent's
-declared capabilities (adapters) and reports compatibility percentage plus
+effective capabilities and reports compatibility percentage plus
 **affected work items** — naming which next action breaks if a capability
 is missing. Compatibility is advisory, never a gate: agents may proceed
 with degraded plans.
+
+Context Git 2.x profiles distinguish `available` (safe local probe),
+`declared` (adapter claim that cannot be measured portably), `unavailable`
+(a measurable declaration was not found), and `unknown`. Tools MUST NOT
+present an adapter declaration as machine-observed evidence.
+
+### Private session ingestion (optional V2 implementation feature)
+
+UACP stores compressed working state, never a transcript. An implementation
+MAY derive Context fields from a private agent session only when the user
+explicitly selects it or requests project-scoped latest-session discovery.
+Ordinary snapshot, status, diff and resume operations MUST NOT scan private
+session directories.
+
+An importer MUST discard system/developer prompts, tool calls/results,
+reasoning/thinking blocks and all raw messages. It MAY retain only extracted
+P0 work-state fields plus non-sensitive provenance (provider, format, source
+fingerprint, counts and exclusion guarantees). Extracted strings pass the
+same pre-write redaction and residual scan as manually supplied fields.
 
 ## 10. Security
 

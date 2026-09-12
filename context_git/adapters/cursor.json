@@ -2,7 +2,9 @@
   "name": "cursor",
   "display_name": "Cursor",
   "capabilities": ["filesystem", "shell", "git", "python", "node", "gui", "browser"],
-  "detect_env": ["CURSOR_AGENT", "CURSOR_TRACE_ID"],
-  "context_locations": [],
-  "notes": "Cursor agent mode. Best-effort detection."
+  "detect_env": ["CURSOR_AGENT", "CURSOR_TRACE_ID", "CURSOR_INVOKED_AS", "CURSOR_CONVERSATION_ID", "AGENT_TRANSCRIPTS"],
+  "session_globs": [".cursor/projects/**/agent-transcripts/*/*.jsonl", ".cursor/projects/**/agent-transcripts/*.txt"],
+  "session_env_roots": [{"env": "AGENT_TRANSCRIPTS", "globs": ["*/*.jsonl", "*.txt"]}],
+  "session_formats": ["jsonl", "txt"],
+  "notes": "Cursor agent mode. V2 supports workspace-scoped JSONL transcripts and explicit text exports."
 }

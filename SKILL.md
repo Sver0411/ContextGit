@@ -1,6 +1,6 @@
 ---
 name: context-git
-description: Git for AI Agent Context — version, diff, drift-check and resume an agent's working state (UACP/1.0). Use when the user asks to save progress, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
+description: Git for AI Agent Context — version, diff, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save progress, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
 ---
 
 # Context Git
@@ -79,6 +79,23 @@ Inspect:
 5. Do **not** re-explore the repository from scratch. Only read code when a
    needed fact is genuinely absent from the context.
 
+## V2 session import (only on explicit request)
+
+Never inspect an agent's private session store implicitly. When the user asks
+to import a session:
+
+1. Prefer an explicit session file and preview it first:
+   `python scripts/context_git.py import-session FILE --dry-run`.
+2. Use `sessions --agent NAME` or `import-session --latest --agent NAME` only
+   when the user explicitly asks for discovery/latest-session import.
+3. Review the redacted extracted fields, then use repeatable `--set KEY=VALUE`
+   corrections while saving. The importer discards raw messages, system and
+   developer prompts, tools and reasoning by design.
+4. Run `verify` after saving and report the new context id.
+
+Use `capabilities --json` when the user needs the V2 observed/declaration
+profile. A `declared` capability is not the same as an observed one.
+
 ## Drift / status / diff / log
 
 - `status` — is the current context still fresh? (run before resuming work)
@@ -94,6 +111,8 @@ Inspect:
   `[REDACTED]` finding, remove the secret from your inputs and retry.
 - Never read `.env*`, key files, or credential stores into your notes —
   even redacted, even "just to check".
+- Never read private sessions unless the user explicitly requested session
+  import or discovery. Ordinary context operations must remain session-blind.
 - The tool writes only inside `.context-git/`. If you find yourself editing
   project files "for the handoff", stop — that is a violation.
 

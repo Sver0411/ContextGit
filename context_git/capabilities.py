@@ -9,14 +9,18 @@ This module:
   overridable via ``--agent``)
 * computes target-agent compatibility against ``capabilities_required``
 
-Adapters declare capabilities; they do NOT hack private session data —
-that belongs to a future version.
+V2 enriches those declarations with conservative, read-only environment
+probes.  A probe can prove that a local runtime is available; capabilities
+that cannot be measured safely (for example an agent's browser tool) remain
+explicitly ``declared`` rather than being presented as observed fact.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
@@ -42,7 +46,73 @@ def load_adapters():
     return out
 
 
-def detect_agent(override=None):
+def profile_capabilities(adapter, root=None, environ=None, which=None):
+    """Return an adapter enriched with a conservative capability profile.
+
+    No project code is executed and no network request is made.  Executable
+    probes use ``PATH`` only; the filesystem probe checks whether ``root`` is
+    an accessible directory.  Capabilities such as browser, GUI and
+    subagents cannot be verified portably, so an adapter declaration is kept
+    with status ``declared``.
+
+    ``environ`` and ``which`` are injectable to keep platform tests
+    deterministic.
+    """
+    env = os.environ if environ is None else environ
+    find = shutil.which if which is None else which
+    declared = {str(c).lower() for c in adapter.get("capabilities") or []}
+    profile = {}
+
+    def record(name, available, evidence):
+        if available:
+            status = "available"
+        elif name in declared:
+            status = "unavailable"
+        else:
+            status = "unknown"
+        profile[name] = {"status": status, "evidence": evidence}
+
+    probe_root = Path(root or ".")
+    try:
+        fs_available = probe_root.is_dir() and os.access(str(probe_root), os.R_OK)
+    except OSError:
+        fs_available = False
+    record("filesystem", fs_available, "project-root-readable")
+
+    shell_available = bool(
+        (env.get("COMSPEC") and Path(env["COMSPEC"]).is_file())
+        or find("sh", path=env.get("PATH"))
+        or find("bash", path=env.get("PATH"))
+        or find("pwsh", path=env.get("PATH"))
+        or find("powershell", path=env.get("PATH"))
+    )
+    record("shell", shell_available, "shell-executable")
+    record("git", bool(find("git", path=env.get("PATH"))), "executable:git")
+    # The running interpreter itself is stronger evidence than PATH.
+    record("python", bool(sys.executable), "running-python")
+    record("node", bool(find("node", path=env.get("PATH"))), "executable:node")
+
+    for name in KNOWN_CAPABILITIES:
+        if name in profile:
+            continue
+        profile[name] = {
+            "status": "declared" if name in declared else "unknown",
+            "evidence": "adapter-declaration" if name in declared else "none",
+        }
+
+    effective = [
+        name for name in KNOWN_CAPABILITIES
+        if profile[name]["status"] in ("available", "declared")
+    ]
+    enriched = dict(adapter)
+    enriched["declared_capabilities"] = sorted(declared)
+    enriched["capabilities"] = effective
+    enriched["capability_profile"] = profile
+    enriched["profile_version"] = 1
+    return enriched
+
+
+def detect_agent(override=None, root=None, probe=True):
     """Detect the current agent.
 
     Order: explicit override > environment markers > generic.
@@ -52,25 +122,31 @@ def detect_agent(override=None):
     if override:
         key = override.strip().lower()
         if key in adapters:
-            return adapters[key], "explicit"
+            adapter = adapters[key]
+            return (profile_capabilities(adapter, root) if probe else adapter), "explicit"
         # unknown agent name: build a generic adapter with declared name
-        return {
+        adapter = {
             "name": key,
             "display_name": key,
             "capabilities": [],
             "notes": "unknown adapter; capabilities are undeclared",
-        }, "explicit-unknown"
+        }
+        # An arbitrary target name is not evidence that its agent can use the
+        # current process's tools.  Keep it unknown instead of projecting the
+        # host profile onto a possibly remote agent.
+        return adapter, "explicit-unknown"
 
     for name, adapter in adapters.items():
         for env_key in adapter.get("detect_env", []) or []:
             if os.environ.get(env_key):
-                return adapter, "env:{}".format(env_key)
+                return (profile_capabilities(adapter, root) if probe else adapter), \
+                    "env:{}".format(env_key)
 
     generic = adapters.get("generic") or {
         "name": "generic", "display_name": "Generic Agent",
         "capabilities": ["filesystem", "shell", "git"],
     }
-    return generic, "fallback"
+    return (profile_capabilities(generic, root) if probe else generic), "fallback"
 
 
 def required_capabilities(ctx_obj):
@@ -90,10 +166,16 @@ def compatibility(required, adapter):
     Returns {percent, satisfied, missing, unknown, warnings}.
     """
     caps = {c.lower() for c in adapter.get("capabilities") or []}
+    profile = adapter.get("capability_profile") or {}
     satisfied, missing, unknown = [], [], []
+    verified, declared_only = [], []
     for cap in required:
         if cap in caps:
             satisfied.append(cap)
+            if (profile.get(cap) or {}).get("status") == "available":
+                verified.append(cap)
+            elif (profile.get(cap) or {}).get("status") == "declared":
+                declared_only.append(cap)
         elif cap in KNOWN_CAPABILITIES:
             missing.append(cap)
         else:
@@ -103,6 +185,8 @@ def compatibility(required, adapter):
     return {
         "percent": percent,
         "satisfied": satisfied,
+        "verified": verified,
+        "declared_only": declared_only,
         "missing": missing,
         "unknown": unknown,   # we can't judge capabilities we don't know
         "warnings": [],
@@ -114,6 +198,13 @@ def compatibility_report(ctx_obj, adapter):
     """Compatibility + warnings that name affected work items."""
     required = required_capabilities(ctx_obj)
     report = compatibility(required, adapter)
+    if report.get("declared_only"):
+        report["warnings"].append({
+            "message": "adapter declares but local probes cannot verify: {}".format(
+                ", ".join(report["declared_only"])
+            ),
+            "affected": [],
+        })
     if report["missing"]:
         targets = []
         for action in ctx_obj.get("recommended_actions") or []:

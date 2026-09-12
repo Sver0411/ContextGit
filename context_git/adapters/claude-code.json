@@ -3,6 +3,8 @@
   "display_name": "Claude Code",
   "capabilities": ["filesystem", "shell", "git", "python", "node", "network", "subagents", "browser"],
   "detect_env": ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"],
-  "context_locations": [],
-  "notes": "Anthropic Claude Code. Browser via tool integrations."
+  "session_globs": [".claude/projects/**/*.jsonl"],
+  "session_env_roots": [{"env": "CLAUDE_CONFIG_DIR", "globs": ["projects/**/*.jsonl"]}],
+  "session_formats": ["jsonl"],
+  "notes": "Anthropic Claude Code. V2 can explicitly import visible user/assistant messages; tool and thinking blocks are discarded."
 }

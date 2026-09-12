@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-git"
-version = "1.0.0"
-description = "Git for AI Agent Context — version, diff, drift-check and resume an agent's working state (UACP/1.0)."
+version = "2.0.0"
+description = "Git for AI Agent Context — version, diff, drift-check, session import and resume agent state (UACP/1.0)."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -25,6 +25,7 @@ classifiers = [
 Homepage = "https://github.com/Sver0411/ContextGit"
 Repository = "https://github.com/Sver0411/ContextGit"
 Issues = "https://github.com/Sver0411/ContextGit/issues"
+Changelog = "https://github.com/Sver0411/ContextGit/blob/main/CHANGELOG.md"
 
 [project.scripts]
 context-git = "context_git.cli:main"

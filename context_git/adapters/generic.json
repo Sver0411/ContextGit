@@ -3,6 +3,7 @@
   "display_name": "Generic Agent",
   "capabilities": ["filesystem", "shell", "git"],
   "detect_env": [],
-  "context_locations": [],
-  "notes": "Fallback adapter: the minimum any coding agent can do."
+  "session_globs": [],
+  "session_formats": ["json", "jsonl", "md", "txt"],
+  "notes": "Fallback adapter. V2 can explicitly import generic role/content transcripts."
 }

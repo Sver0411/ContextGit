@@ -1,4 +1,4 @@
-include LICENSE README.md SKILL.md
+include LICENSE README.md SKILL.md CHANGELOG.md
 recursive-include schemas *.json
 recursive-include references *.md
 recursive-include examples *

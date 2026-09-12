@@ -3,6 +3,8 @@
   "display_name": "OpenAI Codex",
   "capabilities": ["filesystem", "shell", "git", "python", "node", "network", "browser"],
   "detect_env": ["CODEX_SANDBOX", "CODEX_HOME"],
-  "context_locations": [],
-  "notes": "Codex CLI. Browser capability depends on sandbox networking; declared optimistically."
+  "session_globs": [".codex/sessions/**/*.jsonl"],
+  "session_env_roots": [{"env": "CODEX_HOME", "globs": ["sessions/**/*.jsonl"]}],
+  "session_formats": ["jsonl"],
+  "notes": "Codex CLI. V2 can explicitly import visible user/assistant messages from local rollout JSONL; tool and reasoning records are discarded."
 }

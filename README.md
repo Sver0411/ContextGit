@@ -7,7 +7,7 @@
 Most handoff tools generate a document.<br>
 Context Git versions the working state itself.
 
-Snapshot · Diff · Detect drift · Resume anywhere.
+Snapshot · Diff · Detect drift · Import sessions · Resume anywhere.
 
 ```
 Codex
@@ -90,6 +90,13 @@ context-git log                   # the context chain
 context-git resume                # the agent-ready briefing (drift + capabilities + next step)
 context-git checkout ctx_001      # move context HEAD back in time (git repo untouched)
 context-git verify                # residual secret scan over the store
+context-git capabilities          # probe capabilities available in this environment
+
+# V2: private session access is always explicit
+context-git sessions --agent codex
+context-git import-session /path/to/session.jsonl --dry-run
+context-git import-session /path/to/session.jsonl --agent codex
+context-git import-session --latest --agent claude-code
 ```
 
 Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
@@ -97,6 +104,68 @@ Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
 uses `validation.test=pass` form). Fields you don't restate are inherited
 from the parent context — commits are incremental, like good commit
 messages, not like re-writing the whole README.
+
+## V2 — private session import
+
+V2 can compress an existing Codex, Claude Code, Cursor, Gemini CLI,
+OpenCode, or generic JSON/JSONL/text session into a Context Object. Current
+OpenCode SQLite stores are queried read-only:
+
+```bash
+# Preview first. The preview is redacted and writes nothing.
+context-git import-session ~/.codex/sessions/.../rollout.jsonl --dry-run
+
+# Create the first context, or an incremental commit when HEAD exists.
+context-git import-session ~/.codex/sessions/.../rollout.jsonl \
+  --set current_objective="Implement token rotation"
+
+# OpenCode: selects the latest session for this project from the DB
+context-git import-session ~/.local/share/opencode/opencode.db --agent opencode
+```
+
+This is deliberately **opt-in**. Ordinary commands never inspect session
+directories. `sessions` and `--latest` only return sessions whose embedded
+working directory matches the current project; an explicit file from a
+different project is refused unless `--allow-other-project` is supplied.
+
+The importer keeps visible user/assistant outcomes only, extracts compact
+fields such as goal, current objective, completed work, issues, decisions,
+constraints and next steps, then runs the normal secret guards. It never
+stores raw messages, system/developer instructions, tool calls, tool results,
+thinking/reasoning blocks, source paths, or the original transcript. Import
+provenance records a truncated source hash and confirms each excluded class.
+
+Supported formats and discovery paths live in adapter JSON files, so adding
+an agent does not require changing the ingestion core.
+
+| Agent | Project-scoped discovery | Input |
+|---|---|---|
+| Codex | embedded `cwd` | rollout JSONL (`response_item` and `event_msg`) |
+| Claude Code | embedded `cwd` | project session JSONL |
+| Cursor | workspace path encoded in directory | nested agent-transcript JSONL or text export |
+| Gemini CLI | SHA-256 project directory | current JSONL and legacy JSON sessions |
+| OpenCode | `session.directory` | current SQLite `message`/`part` store, opened read-only |
+| Generic | explicit file only | role/content JSON, JSONL, Markdown, or text |
+
+## V2 — capability auto-profiling
+
+Static adapter declarations are now combined with conservative read-only
+probes:
+
+```text
+$ context-git capabilities
+Agent Capability Profile
+  filesystem         available   project-root-readable
+  git                available   executable:git
+  browser            declared    adapter-declaration
+  node               unavailable executable:node
+```
+
+Filesystem access and local `shell`, `git`, `python`, and `node` runtimes can
+be observed without executing project code. Browser, GUI, network,
+image-generation, and subagent facilities cannot be verified portably, so
+they remain explicitly marked `declared` or `unknown`. Resume compatibility
+reports distinguish verified capabilities from declaration-only claims.
 
 ## What a handoff looks like
 
@@ -145,6 +214,8 @@ Context Objects speak **UACP/1.0** (Universal Agent Context Protocol):
 - [`schemas/uacp-1.0.schema.json`](schemas/uacp-1.0.schema.json) — normative JSON Schema
 - [`references/schema.md`](references/schema.md) — field-by-field reference
 - [`references/security.md`](references/security.md) — threat model and guarantees
+- [`references/adapters.md`](references/adapters.md) — V2 session formats and discovery boundaries
+- [`CHANGELOG.md`](CHANGELOG.md) — release-by-release changes
 
 Any tool that reads JSON can consume a context; the `protocol: "UACP"`
 field is the discriminator.
@@ -183,6 +254,7 @@ context-git/
 │   ├── project.py          # stack detection (evidence or "unknown")
 │   ├── security.py         # secret guard (redact + residual scan)
 │   ├── capabilities.py     # agent adapters + compatibility
+│   ├── sessions.py         # explicit, compressed private-session ingestion
 │   ├── render.py           # HANDOFF.md / show / log / resume views
 │   ├── common.py           # ignore rules, fingerprints, safe IO
 │   └── adapters/           # codex / claude-code / opencode / cursor / gemini / generic
@@ -198,29 +270,35 @@ context-git/
 |---|---|---|
 | OpenAI Codex | source & target | adapter bundled |
 | Claude Code | source & target | adapter bundled |
-| OpenCode | source & target | adapter bundled |
-| Cursor | target | best-effort detection |
-| Gemini CLI | target | best-effort detection |
+| OpenCode | source & target | adapter bundled; read-only SQLite import |
+| Cursor | source & target | workspace-scoped transcript import |
+| Gemini CLI | source & target | project-hash-scoped session import |
 | Any agent | both | contexts are plain JSON + Markdown; `generic` adapter is the floor |
 
 Store location is a plain directory: sync it, commit it, or copy it —
 no server, no lock-in.
 
-## Known limitations (v1)
+## Known limitations (v2)
 
 - Linear history only (branch/merge is schema-ready but not implemented).
 - Semantic diff is structural — deterministic, LLM-free; it matches reworded
   items by normalisation, not by meaning.
-- Drift reads the working tree of one machine; contexts are not syncable
-  across machines in v1 (copy the directory and re-run `status`).
+- Drift reads the working tree of one machine; contexts are not remotely
+  syncable yet (copy the directory and re-run `status`).
 - Agent detection uses environment markers and can fall back to `generic`.
+- Session extraction is deterministic and LLM-free. Unstructured conversation
+  becomes only goal/current objective; structured headings and checklists
+  produce richer progress/decision/issue fields. Use `--set` to correct a
+  heuristic extraction before saving.
+- Session formats are private implementation details of third-party tools and
+  may change. Explicit JSON/JSONL/text import remains the stable fallback.
 - Validation results are agent-recorded, not executed — the tool never runs
   your build (by design); freshness logic compensates.
 
 ## Roadmap
 
-- **v1 — Context Versioning** ← you are here
-- **v2 — richer adapters** (private session ingestion, capability auto-profiling)
+- **v1 — Context Versioning** ✓
+- **v2 — richer adapters** (private session ingestion, capability auto-profiling) ← you are here
 - **v3 — context branch / merge** (experimental lines of work)
 - **v4 — remote contexts** (push/pull a context chain)
 - **v5 — agent-to-agent context network**

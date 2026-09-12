@@ -3,6 +3,7 @@
   "display_name": "Gemini CLI",
   "capabilities": ["filesystem", "shell", "git", "python", "node", "network"],
   "detect_env": ["GEMINI_API_KEY", "GEMINI_CLI"],
-  "context_locations": [],
-  "notes": "Google Gemini CLI. Best-effort detection."
+  "session_globs": [".gemini/tmp/**/chats/session-*.jsonl", ".gemini/tmp/**/chats/session-*.json"],
+  "session_formats": ["jsonl", "json"],
+  "notes": "Google Gemini CLI. V2 supports explicit local JSON session imports."
 }

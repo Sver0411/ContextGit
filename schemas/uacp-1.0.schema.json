@@ -64,6 +64,22 @@
           "items": { "type": "string" },
           "description": "Capability names from the shared vocabulary: filesystem, shell, git, python, node, browser, gui, network, image-generation, subagents."
         },
+        "declared_capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Capabilities claimed by the adapter before V2 environment probes."
+        },
+        "capability_profile": {
+          "type": "object",
+          "description": "V2 per-capability status and non-sensitive probe evidence.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": { "enum": ["available", "declared", "unavailable", "unknown"] },
+              "evidence": { "type": "string" }
+            }
+          }
+        },
         "source_type": { "$ref": "#/$defs/sourceType" }
       }
     },
@@ -260,7 +276,8 @@
       "properties": {
         "secret_guard": { "type": "string" },
         "redacted_on_write": { "type": "boolean" },
-        "sensitive_files_read": { "type": "boolean", "const": false }
+        "sensitive_files_read": { "type": "boolean", "const": false },
+        "raw_session_stored": { "type": "boolean", "const": false }
       }
     },
     "metadata": {
@@ -279,7 +296,26 @@
           "description": "Drift baseline: {relative path: fingerprint} for important files.",
           "additionalProperties": { "type": "string" }
         },
-        "fingerprint_algorithm": { "type": "string" }
+        "fingerprint_algorithm": { "type": "string" },
+        "session_import": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "description": "V2 provenance for explicit private-session ingestion. No raw transcript or source path is stored.",
+              "properties": {
+                "provider": { "type": "string" },
+                "format": { "type": "string" },
+                "source_fingerprint": { "type": "string" },
+                "messages_considered": { "type": "integer", "minimum": 0 },
+                "fields_extracted": { "type": "array", "items": { "type": "string" } },
+                "raw_transcript_stored": { "const": false },
+                "tool_payloads_stored": { "const": false },
+                "reasoning_stored": { "const": false }
+              }
+            }
+          ]
+        }
       }
     }
   },

@@ -245,7 +245,8 @@ def _merge_unique(old, new):
     return out
 
 
-def build(root, notes, parent_id=None, parent_obj=None, source_agent=None, message=None):
+def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
+          message=None, session_import=None, excluded_paths=None):
     """Build a full UACP Context Object from live state + agent notes.
 
     ``notes`` is a plain dict of agent/user-supplied fields. Fields not
@@ -258,9 +259,19 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None, messa
     git_snap = git_collect(root)
     detection = project_detect(root)
 
+    excluded = set()
+    for candidate in excluded_paths or []:
+        try:
+            excluded.add(Path(candidate).resolve().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            continue
+    if excluded:
+        git_snap = _exclude_git_paths(git_snap, excluded)
+
     notes = _inherit_notes(notes, parent_obj)
 
     selected, reasons = select_important_files(root, git_snap, detection)
+    selected = [rel for rel in selected if rel not in excluded]
     important_files = []
     fingerprints = {}
     for rel in selected:
@@ -305,6 +316,10 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None, messa
         "source_agent": {
             "name": (source_agent or {}).get("name", "generic"),
             "capabilities": (source_agent or {}).get("capabilities", []),
+            "declared_capabilities": (source_agent or {}).get(
+                "declared_capabilities", (source_agent or {}).get("capabilities", [])
+            ),
+            "capability_profile": (source_agent or {}).get("capability_profile", {}),
             "source_type": "observed",
         },
         "target_agent": None,
@@ -341,20 +356,40 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None, messa
         "capabilities_required": _as_items(notes.get("capabilities_required")) or [],
         "recommended_actions": _as_items(notes.get("recommended_actions")),
         "security": {
-            "secret_guard": "context-git/1.0",
+            "secret_guard": "context-git/2.0",
             "redacted_on_write": True,
             "sensitive_files_read": False,
+            "raw_session_stored": False,
         },
         "metadata": {
             "tool": {"name": TOOL_NAME, "version": __version__},
             "notes": redact(str(notes.get("notes") or "").strip()) or None,
             "fingerprints": fingerprints,
             "fingerprint_algorithm": "sha256:full-file-up-to-5MiB+size",
+            "session_import": session_import,
         },
     }
 
     payload["context_id"] = compute_context_id(payload, parent_id)
     return payload
+
+
+def _exclude_git_paths(git_snap, excluded):
+    """Remove an explicitly imported transcript from persisted repo evidence."""
+    clean = dict(git_snap)
+    for key in ("staged", "unstaged", "untracked", "conflicted"):
+        clean[key] = [path for path in clean.get(key, []) if path not in excluded]
+    changes = [
+        item for item in clean.get("changed_files", [])
+        if item.get("path") not in excluded
+    ]
+    clean["changed_files"] = changes
+    clean["diff_stat"] = {
+        "files_changed": len(changes),
+        "additions": sum(int(item.get("additions") or 0) for item in changes),
+        "deletions": sum(int(item.get("deletions") or 0) for item in changes),
+    }
+    return clean
 
 
 def _inherit_notes(notes, parent_obj):

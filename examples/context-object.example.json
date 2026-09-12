@@ -11,8 +11,20 @@
     "capabilities": [
       "filesystem",
       "shell",
+      "git",
+      "python"
+    ],
+    "declared_capabilities": [
+      "filesystem",
+      "shell",
       "git"
     ],
+    "capability_profile": {
+      "filesystem": {"status": "available", "evidence": "project-root-readable"},
+      "shell": {"status": "available", "evidence": "shell-executable"},
+      "git": {"status": "available", "evidence": "executable:git"},
+      "python": {"status": "available", "evidence": "running-python"}
+    },
     "source_type": "observed"
   },
   "target_agent": null,
@@ -243,14 +255,15 @@
     }
   ],
   "security": {
-    "secret_guard": "context-git/1.0",
+    "secret_guard": "context-git/2.0",
     "redacted_on_write": true,
-    "sensitive_files_read": false
+    "sensitive_files_read": false,
+    "raw_session_stored": false
   },
   "metadata": {
     "tool": {
       "name": "context-git",
-      "version": "1.0.0"
+      "version": "2.0.0"
     },
     "notes": null,
     "fingerprints": {
@@ -259,6 +272,7 @@
       "package.json": "sha256:d8ad3a9bfff65d6f5907f4963f3fa9cc",
       "src/version.ts": "sha256:5e915230905ef056525bdb737e8f0e26"
     },
-    "fingerprint_algorithm": "sha256:first-256KiB+size"
+    "fingerprint_algorithm": "sha256:full-file-up-to-5MiB+size",
+    "session_import": null
   }
 }

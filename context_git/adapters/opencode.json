@@ -3,6 +3,8 @@
   "display_name": "OpenCode",
   "capabilities": ["filesystem", "shell", "git", "python", "node", "network"],
   "detect_env": ["OPENCODE", "OPENCODE_SERVER"],
-  "context_locations": [],
-  "notes": "OpenCode terminal agent."
+  "session_globs": [".local/share/opencode/opencode.db"],
+  "session_env_roots": [{"env": "XDG_DATA_HOME", "globs": ["opencode/opencode.db"]}],
+  "session_formats": ["sqlite", "json", "jsonl"],
+  "notes": "OpenCode terminal agent. V2 reads the current SQLite message/part store in read-only mode; generic exports remain supported."
 }

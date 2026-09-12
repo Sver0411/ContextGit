@@ -11,6 +11,9 @@ Commands:
     resume [ctx_id]          agent-ready briefing: drift + capability + next steps
     checkout <ctx_id|->      move context HEAD (never touches your git repo)
     verify                   residual secret scan over the store
+    sessions                 discover project-matching private sessions (opt-in)
+    import-session           create a context from an explicit private session
+    capabilities             auto-profile the current agent environment
 
 Global flags: --root, --json, -q. Run from any directory inside the project.
 Standard library only.
@@ -32,6 +35,10 @@ from .diff import semantic_diff, render as render_diff
 from .drift import check as drift_check, format_report
 from .render import handoff_md, log as render_log, resume_briefing, show as render_show
 from .security import redact, scan_object
+from .sessions import (
+    SessionImportError, discover_sessions, import_metadata, infer_provider,
+    read_session, session_to_notes,
+)
 from .storage import Store, StoreError, utc_now_iso
 
 PROMPT_FIELDS = [
@@ -124,7 +131,10 @@ def _snapshot(root, args, require_change):
     if not store.exists():
         raise StoreError("no context store here — run `context-git init` first")
 
-    notes = parse_set_args(args.set)
+    notes = dict(getattr(args, "imported_notes", None) or {})
+    # Explicit --set values are corrections and therefore replace a
+    # heuristic session extraction field-by-field.
+    notes.update(parse_set_args(args.set))
     notes.update(_interactive_notes(skip=args.no_prompt))
 
     parent = store.head_object()
@@ -137,7 +147,11 @@ def _snapshot(root, args, require_change):
         eprint("Return to the latest context with `context-git checkout -` first.")
         return 1
 
-    agent, how = detect_agent(getattr(args, "agent", None))
+    supplied_agent = getattr(args, "source_agent_obj", None)
+    if supplied_agent:
+        agent, how = supplied_agent, "session-import"
+    else:
+        agent, how = detect_agent(getattr(args, "agent", None), root=root)
     if not args.quiet:
         eprint("[snapshot] agent: {} ({})".format(agent.get("name"), how))
 
@@ -147,6 +161,9 @@ def _snapshot(root, args, require_change):
         parent_obj=parent,
         source_agent=agent,
         message=getattr(args, "message", None),
+        session_import=getattr(args, "imported_session_meta", None),
+        excluded_paths=[getattr(args, "imported_source_path", None)]
+        if getattr(args, "imported_source_path", None) else None,
     )
 
     # Security gate FIRST — even a no-op commit must never be the place a
@@ -356,7 +373,7 @@ def cmd_resume(root, args):
         return 1
 
     drift = drift_check(root, ctx)
-    agent, how = detect_agent(getattr(args, "agent", None))
+    agent, how = detect_agent(getattr(args, "agent", None), root=root)
     compat = compatibility_report(ctx, agent)
     briefing = resume_briefing(ctx, drift, compat, agent)
 
@@ -405,7 +422,7 @@ def cmd_checkout(root, args):
     ctx = store.head_object()
     if ctx:
         drift = drift_check(root, ctx)
-        agent, _ = detect_agent(None)
+        agent, _ = detect_agent(None, root=root)
         compat = compatibility_report(ctx, agent) \
             if ctx.get("capabilities_required") else None
         write_text(
@@ -460,7 +477,7 @@ def cmd_verify(root, args):
 
 def cmd_adapters(root, args):
     adapters = load_adapters()
-    agent, how = detect_agent(getattr(args, "agent", None))
+    agent, how = detect_agent(getattr(args, "agent", None), root=root)
     if args.json:
         print(json.dumps({
             "available": sorted(adapters.keys()),
@@ -473,6 +490,146 @@ def cmd_adapters(root, args):
         agent.get("display_name", agent.get("name")), how,
         ", ".join(agent.get("capabilities") or [])))
     return 0
+
+
+def cmd_capabilities(root, args):
+    """Show the V2 static-declaration + environment-probe profile."""
+    agent, how = detect_agent(getattr(args, "agent", None), root=root)
+    payload = {
+        "agent": agent.get("name"),
+        "display_name": agent.get("display_name", agent.get("name")),
+        "detected_via": how,
+        "effective_capabilities": agent.get("capabilities") or [],
+        "declared_capabilities": agent.get("declared_capabilities") or [],
+        "profile": agent.get("capability_profile") or {},
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print("Agent Capability Profile")
+    print("  Agent: {} ({})".format(payload["display_name"], how))
+    for name in sorted(payload["profile"]):
+        entry = payload["profile"][name]
+        print("  {:18} {:11} {}".format(
+            name, entry.get("status", "unknown"), entry.get("evidence", "")
+        ))
+    print("  Effective: {}".format(
+        ", ".join(payload["effective_capabilities"]) or "(none)"
+    ))
+    return 0
+
+
+def _session_provider(root, requested, source=None):
+    if requested:
+        return requested.strip().lower()
+    if source:
+        inferred = infer_provider(source)
+        if inferred != "generic":
+            return inferred
+    agent, _ = detect_agent(None, root=root)
+    return agent.get("name") or "generic"
+
+
+def cmd_sessions(root, args):
+    """Opt-in discovery of private sessions associated with this project."""
+    provider = _session_provider(root, getattr(args, "agent", None))
+    found = discover_sessions(provider, root, limit=args.limit)
+    if args.json:
+        print(json.dumps({
+            "provider": provider,
+            "project_root": str(root),
+            "sessions": found,
+        }, indent=2, ensure_ascii=False))
+        return 0 if found else 1
+    if not found:
+        eprint("no {} sessions with an embedded cwd matching {}".format(provider, root))
+        eprint("Pass an explicit file to `context-git import-session FILE` instead.")
+        return 1
+    print("Private sessions for {} ({})".format(root.name, provider))
+    for index, item in enumerate(found, 1):
+        selector = " · session {}".format(item["session_id"]) \
+            if item.get("session_id") else ""
+        count = " · {} visible messages".format(item["message_count"]) \
+            if item.get("message_count") is not None else ""
+        print("  {}. {}{}{}".format(index, item["path"], selector, count))
+    print("Nothing was imported. Choose a path explicitly, or use import-session --latest.")
+    return 0
+
+
+def _same_path(left, right):
+    try:
+        return Path(left).expanduser().resolve() == Path(right).resolve()
+    except OSError:
+        return False
+
+
+def cmd_import_session(root, args):
+    """Compress an explicitly selected private session into a context."""
+    if args.source and args.latest:
+        raise SessionImportError("choose either an explicit session file or --latest")
+    provider = _session_provider(root, getattr(args, "agent", None), args.source)
+    source = args.source
+    if args.latest:
+        found = discover_sessions(provider, root, limit=1)
+        if not found:
+            raise SessionImportError(
+                "no {} session has an embedded cwd matching this project"
+                .format(provider)
+            )
+        source = found[0]["path"]
+        args.session_id = found[0].get("session_id")
+    if not source:
+        raise SessionImportError("pass a session file or use --latest")
+
+    read_root = None if (args.allow_other_project and args.session_id) else root
+    parsed = read_session(
+        source, provider=provider, project_root=read_root, session_id=args.session_id,
+    )
+    embedded_root = parsed.get("project_root")
+    if embedded_root and not _same_path(embedded_root, root) and not args.allow_other_project:
+        raise SessionImportError(
+            "session belongs to a different project; pass --allow-other-project "
+            "only if that is intentional"
+        )
+    store = Store(root)
+    parent = store.head_object() if store.exists() else None
+    notes = session_to_notes(parsed, include_goal=not bool((parent or {}).get("goal")))
+    if not notes:
+        raise SessionImportError("session contained no importable work-state fields")
+    provenance = import_metadata(parsed, notes)
+
+    preview = {
+        "provider": provider,
+        "message_count": parsed.get("message_count", 0),
+        "extracted": notes,
+        "provenance": provenance,
+    }
+    if args.dry_run:
+        if args.json:
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+        else:
+            print("Session Import Preview")
+            print("  Provider: {}".format(provider))
+            print("  Messages considered: {}".format(parsed.get("message_count", 0)))
+            print("  Extracted fields: {}".format(
+                ", ".join(sorted(notes.keys()))
+            ))
+            print(json.dumps(notes, indent=2, ensure_ascii=False))
+            print("No files were written (--dry-run).")
+        return 0
+
+    if not store.exists():
+        raise StoreError("no context store here — run `context-git init` first")
+    # The session may be an export from another machine. Do not project this
+    # host's runtime probes onto the historical source agent.
+    agent, _ = detect_agent(provider, root=root, probe=False)
+    args.source_agent_obj = agent
+    args.imported_notes = notes
+    args.imported_session_meta = provenance
+    args.imported_source_path = source
+    if not args.message:
+        args.message = "Imported {} session context".format(provider)
+    return _snapshot(root, args, require_change=parent is not None)
 
 
 # --------------------------------------------------------------------------
@@ -562,6 +719,49 @@ def build_parser():
                    allow_empty=False, ctx_id=None, limit=None,
                    targets=None, write_briefing=False)
 
+    p = sub.add_parser(
+        "capabilities", parents=[common],
+        help="auto-profile agent capabilities using safe local probes",
+    )
+    p.add_argument("--agent", default=None, help="agent name override")
+    p.set_defaults(func=cmd_capabilities, set=[], no_prompt=True, message=None,
+                   allow_empty=False, ctx_id=None, limit=None,
+                   targets=None, write_briefing=False)
+
+    p = sub.add_parser(
+        "sessions", parents=[common],
+        help="discover project-matching private sessions (explicit opt-in)",
+    )
+    p.add_argument("--agent", default=None, help="session provider (default: detected agent)")
+    p.add_argument("--limit", type=int, default=10, help="maximum matches (default 10)")
+    p.set_defaults(func=cmd_sessions, set=[], no_prompt=True, message=None,
+                   allow_empty=False, ctx_id=None, targets=None,
+                   write_briefing=False)
+
+    p = sub.add_parser(
+        "import-session", parents=[common],
+        help="create a context from a private session (explicit opt-in)",
+    )
+    p.add_argument("source", nargs="?", help="session export, or an OpenCode .db")
+    p.add_argument("--latest", action="store_true",
+                   help="use the latest detected session whose cwd matches --root")
+    p.add_argument("--agent", default=None,
+                   help="source session provider (codex, claude-code, cursor, gemini-cli, opencode)")
+    p.add_argument("--session-id", default=None,
+                   help="specific OpenCode SQLite session id (default: latest for --root)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="preview redacted extracted fields without writing")
+    p.add_argument("--allow-other-project", action="store_true",
+                   help="allow an explicit session whose embedded cwd differs from --root")
+    p.add_argument("-m", "--message", default=None,
+                   help="one-line context summary (default: imported provider session)")
+    p.add_argument("--set", action="append", metavar="KEY=VALUE", default=[],
+                   help="correct an extracted field before saving; same keys as snapshot")
+    p.set_defaults(func=cmd_import_session, no_prompt=True, allow_empty=False,
+                   ctx_id=None, limit=None, targets=None, write_briefing=False,
+                   imported_notes=None, imported_session_meta=None,
+                   imported_source_path=None, source_agent_obj=None)
+
     return ap
 
 
@@ -605,6 +805,9 @@ def main(argv=None):
     except StoreError as exc:
         eprint("error: {}".format(exc))
         return 1
+    except SessionImportError as exc:
+        eprint("session import refused: {}".format(exc))
+        return 2
     except KeyboardInterrupt:
         eprint("\ninterrupted.")
         return 130

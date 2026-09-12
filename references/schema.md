@@ -17,9 +17,10 @@ This document explains intent, defaults and prohibited content per field.
 
 ## Agent blocks
 
-* `source_agent` — `{name, capabilities[], source_type}`. Who created this.
-  Capability names come from the shared vocabulary; unknown names are
-  preserved verbatim (forward compatibility).
+* `source_agent` — `{name, capabilities[], declared_capabilities[],
+  capability_profile{}, source_type}`. Who created this. V2 profiles use
+  `available / declared / unavailable / unknown`; older readers can ignore
+  these additive fields. Unknown capability names are preserved.
 * `target_agent` — always `null` when stored; resuming tools may fill a
   working copy for their own compatibility report.
 
@@ -70,7 +71,9 @@ inherited value (agents deliberately say "no more pending work").
 * `security` — `{secret_guard, redacted_on_write: true, sensitive_files_read: false}`.
   Lets auditors verify the guard ran without re-scanning.
 * `metadata` — tool name/version, free notes, `fingerprints` map
-  (drift baseline), `fingerprint_algorithm`.
+  (drift baseline), `fingerprint_algorithm`, and optional `session_import`
+  provenance. Session provenance contains no source path or transcript and
+  records that raw messages, tools and reasoning were not stored.
 * `extensions` — reserved empty object for future capability blocks.
 
 ## Prohibited content (P3 — rejects or redacts on write)
