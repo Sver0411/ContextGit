@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Sver0411/ContextGit/main/schemas/uacp-1.0.schema.json",
+  "title": "UACP Context Object",
+  "description": "Universal Agent Context Protocol v1.0 — a versioned, compressed representation of an AI agent's working state on a project. Not a chat transcript, not a repository copy.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "protocol_version",
+    "schema_version",
+    "context_id",
+    "parent_context_id",
+    "created_at",
+    "project",
+    "git",
+    "security",
+    "metadata"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "protocol": {
+      "const": "UACP",
+      "description": "Protocol discriminator. Any tool seeing 'UACP' knows this file is a Context Object."
+    },
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Protocol semantics version. Readers must accept any 1.x they understand.",
+      "examples": ["1.0"]
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Field-level schema version, may advance independently of protocol_version.",
+      "examples": ["1.0"]
+    },
+    "context_id": {
+      "type": "string",
+      "pattern": "^ctx_[0-9a-f]{8,16}$",
+      "description": "Stable identifier: sha256(parent_id, created_at, repo HEAD, canonical core payload), truncated to 8 hex chars, prefixed ctx_."
+    },
+    "parent_context_id": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^ctx_[0-9a-f]{8,16}$" }
+      ],
+      "description": "Linear history in v1. Non-null parent enables future branching (a DAG) without a schema change."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC ISO-8601, e.g. 2026-09-12T11:25:42Z."
+    },
+    "message": {
+      "type": ["string", "null"],
+      "description": "One-line human summary of what changed cognitively since the parent."
+    },
+    "source_agent": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Capability names from the shared vocabulary: filesystem, shell, git, python, node, browser, gui, network, image-generation, subagents."
+        },
+        "source_type": { "$ref": "#/$defs/sourceType" }
+      }
+    },
+    "target_agent": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "capabilities": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ],
+      "description": "Null in a stored context. A resuming tool may fill it in its own working copy."
+    },
+    "project": {
+      "type": "object",
+      "required": ["name", "root", "type"],
+      "properties": {
+        "name": { "type": "string" },
+        "root": { "type": "string", "description": "Absolute filesystem path of the project root." },
+        "type": { "type": "string", "description": "Primary language or 'unknown'." },
+        "stack": { "type": "object" },
+        "source_type": { "$ref": "#/$defs/sourceType" }
+      }
+    },
+    "goal": {
+      "type": ["string", "null"],
+      "description": "The user's ultimate goal for the project. P0, agent-supplied."
+    },
+    "current_objective": {
+      "type": ["string", "null"],
+      "description": "What the agent is solving right now. P0, agent-supplied."
+    },
+    "progress": {
+      "type": "object",
+      "properties": {
+        "completed": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+        "in_progress": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+        "pending": { "type": "array", "items": { "$ref": "#/$defs/item" } }
+      }
+    },
+    "architecture": {
+      "type": "array",
+      "description": "Important architecture claims with explicit provenance, confidence and freshness.",
+      "items": {
+        "type": "object",
+        "required": ["fact", "confidence", "freshness", "source_type"],
+        "properties": {
+          "fact": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "source": { "type": ["string", "null"] },
+          "freshness": { "enum": ["fresh", "stale", "unknown"] },
+          "source_type": { "$ref": "#/$defs/sourceType" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["decision"],
+        "properties": {
+          "decision": { "type": "string" },
+          "reason": { "type": "string" },
+          "rejected": { "type": "array", "items": { "type": "string" } },
+          "source_type": { "$ref": "#/$defs/sourceType" }
+        }
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "description": "Project constraints (platform, style, architecture limits). P0."
+    },
+    "do_not_change": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "description": "Things the user explicitly forbade changing. P0 — receivers must honour these."
+    },
+    "known_issues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "description": "Open bugs and blockers. Removal in a later context means resolved."
+    },
+    "important_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "POSIX-style path relative to project root. Never a forbidden path."
+          },
+          "why": { "type": "string", "description": "Why this file matters for the handoff." },
+          "fingerprint": {
+            "type": ["string", "null"],
+            "description": "sha256:<32hex> over the full file plus size for regular files up to 5 MiB. Larger files and symlinks are skipped."
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "freshness": { "enum": ["fresh", "stale", "unknown"] },
+          "source_type": { "$ref": "#/$defs/sourceType" }
+        }
+      },
+      "description": "5–20 files max — the minimum set to understand current work. Never a repo dump."
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "detached_head": { "type": "boolean" },
+        "head": { "type": ["string", "null"] },
+        "head_short": { "type": ["string", "null"] },
+        "head_subject": { "type": ["string", "null"] },
+        "upstream": { "type": ["string", "null"] },
+        "ahead": { "type": ["integer", "null"] },
+        "behind": { "type": ["integer", "null"] },
+        "repo_state": { "type": "string" },
+        "commit_count": { "type": ["integer", "null"] },
+        "working_tree": {
+          "type": "object",
+          "properties": {
+            "clean": { "type": ["boolean", "null"] },
+            "staged": { "type": "array", "items": { "type": "string" } },
+            "unstaged": { "type": "array", "items": { "type": "string" } },
+            "untracked": { "type": "array", "items": { "type": "string" } },
+            "conflicted": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "changed_files": {
+          "type": "array",
+          "description": "Path + change_type + line counts only. Never diff hunk content.",
+          "items": { "type": "object" }
+        },
+        "diff_stat": { "type": "object" },
+        "recent_commits": {
+          "type": "array",
+          "description": "P2. hash/author/when/subject — no bodies.",
+          "items": { "type": "object" }
+        },
+        "source_type": { "$ref": "#/$defs/sourceType" },
+        "observed_at": { "type": ["string", "null"], "format": "date-time" },
+        "freshness": { "enum": ["fresh", "stale", "unknown"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "description": "Last recorded build/test/lint/typecheck results. freshness is re-evaluated by the drift engine: if source changed after observed_at, results are STALE.",
+      "properties": {
+        "build": { "$ref": "#/$defs/validationEntry" },
+        "test": { "$ref": "#/$defs/validationEntry" },
+        "lint": { "$ref": "#/$defs/validationEntry" },
+        "typecheck": { "$ref": "#/$defs/validationEntry" },
+        "observed_at": { "type": ["string", "null"], "format": "date-time" },
+        "source_type": { "$ref": "#/$defs/sourceType" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "note": { "type": ["string", "null"] },
+        "freshness": { "enum": ["fresh", "stale", "unknown"] }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Non-sensitive environment facts only. Never credentials.",
+      "properties": {
+        "os": { "type": "string" },
+        "os_release": { "type": "string" },
+        "arch": { "type": "string" },
+        "python": { "type": "string" },
+        "project_runtime": { "type": "object" },
+        "package_manager": { "type": "string" },
+        "is_git_repo": { "type": "boolean" },
+        "is_monorepo": { "type": "boolean" },
+        "source_type": { "$ref": "#/$defs/sourceType" }
+      }
+    },
+    "capabilities_required": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "description": "Capabilities the continuing work depends on (e.g. browser). Used for target-agent compatibility."
+    },
+    "recommended_actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "description": "Ordered next actions for the receiving agent. P0."
+    },
+    "security": {
+      "type": "object",
+      "description": "Redaction provenance, so auditors can tell whether the guard ran.",
+      "properties": {
+        "secret_guard": { "type": "string" },
+        "redacted_on_write": { "type": "boolean" },
+        "sensitive_files_read": { "type": "boolean", "const": false }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" }
+          }
+        },
+        "notes": { "type": ["string", "null"] },
+        "fingerprints": {
+          "type": "object",
+          "description": "Drift baseline: {relative path: fingerprint} for important files.",
+          "additionalProperties": { "type": "string" }
+        },
+        "fingerprint_algorithm": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "sourceType": {
+      "enum": ["observed", "agent"],
+      "description": "Evidence model: 'observed' = measured from the machine (reproducible); 'agent' = asserted by the exporting agent or user (trust but verify)."
+    },
+    "item": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "source_type": { "$ref": "#/$defs/sourceType" }
+      },
+      "description": "A single semantic bullet with provenance."
+    },
+    "validationEntry": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["result"],
+          "properties": {
+            "result": { "type": "string", "description": "e.g. pass, fail, 42 passed" }
+          }
+        }
+      ]
+    }
+  }
+}

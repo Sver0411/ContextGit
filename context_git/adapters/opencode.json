@@ -1,0 +1,8 @@
+{
+  "name": "opencode",
+  "display_name": "OpenCode",
+  "capabilities": ["filesystem", "shell", "git", "python", "node", "network"],
+  "detect_env": ["OPENCODE", "OPENCODE_SERVER"],
+  "context_locations": [],
+  "notes": "OpenCode terminal agent."
+}

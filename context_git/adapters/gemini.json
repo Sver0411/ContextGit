@@ -1,0 +1,8 @@
+{
+  "name": "gemini-cli",
+  "display_name": "Gemini CLI",
+  "capabilities": ["filesystem", "shell", "git", "python", "node", "network"],
+  "detect_env": ["GEMINI_API_KEY", "GEMINI_CLI"],
+  "context_locations": [],
+  "notes": "Google Gemini CLI. Best-effort detection."
+}

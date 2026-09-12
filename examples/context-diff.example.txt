@@ -1,0 +1,26 @@
+Context Diff
+  ctx_f6a843a0 → ctx_a354aed0
+  at 2026-09-12T12:26:19Z
+
+Progress
+  + Reasoning loop
+  ~ Tool execution layer (pending → in_progress)
+  + Rate limiting
+  + Browser validation harness
+  - Project scaffold
+
+Decisions
+  + Tools registered via decorator registry — reason: Plugins can be added without touching the loop — rejected: Hardcoded switch: adds a core edit per tool
+
+Known Issues
+  + Browser screenshot step hangs on headless Chromium [NEW ISSUE]
+
+Validation
+  ~ build: not recorded → pass
+  ~ test: not recorded → fail
+
+Next Step
+  + Fix the 2 failing tool-registry tests
+  + Then implement browser validation step
+  - Design the tool registry interface
+

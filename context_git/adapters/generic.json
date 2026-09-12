@@ -1,0 +1,8 @@
+{
+  "name": "generic",
+  "display_name": "Generic Agent",
+  "capabilities": ["filesystem", "shell", "git"],
+  "detect_env": [],
+  "context_locations": [],
+  "notes": "Fallback adapter: the minimum any coding agent can do."
+}

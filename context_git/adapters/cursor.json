@@ -1,0 +1,8 @@
+{
+  "name": "cursor",
+  "display_name": "Cursor",
+  "capabilities": ["filesystem", "shell", "git", "python", "node", "gui", "browser"],
+  "detect_env": ["CURSOR_AGENT", "CURSOR_TRACE_ID"],
+  "context_locations": [],
+  "notes": "Cursor agent mode. Best-effort detection."
+}

@@ -1,0 +1,8 @@
+{
+  "name": "codex",
+  "display_name": "OpenAI Codex",
+  "capabilities": ["filesystem", "shell", "git", "python", "node", "network", "browser"],
+  "detect_env": ["CODEX_SANDBOX", "CODEX_HOME"],
+  "context_locations": [],
+  "notes": "Codex CLI. Browser capability depends on sandbox networking; declared optimistically."
+}

@@ -1,0 +1,8 @@
+{
+  "name": "claude-code",
+  "display_name": "Claude Code",
+  "capabilities": ["filesystem", "shell", "git", "python", "node", "network", "subagents", "browser"],
+  "detect_env": ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"],
+  "context_locations": [],
+  "notes": "Anthropic Claude Code. Browser via tool integrations."
+}

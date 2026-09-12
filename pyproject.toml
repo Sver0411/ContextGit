@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-git"
+version = "1.0.0"
+description = "Git for AI Agent Context — version, diff, drift-check and resume an agent's working state (UACP/1.0)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Sver0411" }]
+keywords = ["ai-agents", "agent-handoff", "context", "developer-tools", "cli"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Version Control",
+]
+
+[project.urls]
+Homepage = "https://github.com/Sver0411/ContextGit"
+Repository = "https://github.com/Sver0411/ContextGit"
+Issues = "https://github.com/Sver0411/ContextGit/issues"
+
+[project.scripts]
+context-git = "context_git.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["context_git*"]
+
+[tool.setuptools.package-data]
+context_git = ["adapters/*.json"]
+
+[tool.setuptools.data-files]
+"share/context-git/schemas" = ["schemas/*.json"]
+"share/context-git/references" = ["references/*.md"]
