@@ -19,6 +19,7 @@ Commands:
     merge                    three-way merge another context branch
     remote                   configure Context remotes
     push / fetch / pull      synchronize immutable Context objects and refs
+    network                  Agent identities, handoffs, inbox, accept, receipts
 
 Global flags: --root, --json, -q. Run from any directory inside the project.
 Standard library only.
@@ -39,6 +40,12 @@ from .capabilities import compatibility_report, detect_agent, load_adapters
 from .diff import semantic_diff, render as render_diff
 from .drift import check as drift_check, format_report
 from .merge import MergeError, merge_contexts
+from .network import (
+    NetworkError, accept as network_accept, inbox as network_inbox,
+    list_agents as network_list_agents, register as network_register,
+    reply as network_reply, send as network_send,
+    sent_status as network_sent_status, sync as network_sync,
+)
 from .remote import (
     RemoteError, create_transport, fetch as remote_fetch,
     make_remote_config, pull as remote_pull, push as remote_push,
@@ -711,6 +718,10 @@ def cmd_verify(root, args):
         targets.append(store.context_path(resolved))
     else:
         targets = [store.context_path(cid) for cid in store.list_context_ids()]
+        for kind in ("handoffs", "receipts"):
+            for obj in store.list_network_objects(kind):
+                key = "handoff_id" if kind == "handoffs" else "receipt_id"
+                targets.append(store._network_object_path(kind, obj[key]))
         handoff = store.dir / "HANDOFF.md"
         if handoff.is_file():
             targets.append(handoff)
@@ -852,6 +863,7 @@ def cmd_remote_add(root, args):
     )
     if replacing:
         store.delete_remote_refs(name)
+        store.clear_network_identity(name)
     store.set_remote(name, config)
     if args.json:
         print(json.dumps({"name": name, **config}, indent=2, ensure_ascii=False))
@@ -870,6 +882,7 @@ def cmd_remote_remove(root, args):
     if name not in store.remotes():
         raise StoreError("unknown remote: {}".format(name))
     store.delete_remote_refs(name)
+    store.clear_network_identity(name)
     store.remove_remote(name)
     if args.json:
         print(json.dumps({"removed": name}, indent=2))
@@ -960,6 +973,193 @@ def cmd_pull(root, args):
     if result.get("action") == "fast-forward":
         _refresh_handoff(root, store)
     _render_sync_result(result, args)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# V5 Agent Context Network
+# --------------------------------------------------------------------------
+
+def _network_remote(store, requested=None):
+    return _select_remote(store, requested)
+
+
+def cmd_network_root(root, args):
+    args.network_parser.print_help()
+    return 0
+
+
+def _network_sync(store, remote_name, config, allow_other_project=False):
+    transport = create_transport(config, store.root)
+    # A handoff points into the V4 object graph. Authenticate/import that graph
+    # before accepting network metadata that references it.
+    remote_fetch(
+        store, remote_name, transport,
+        allow_other_project=allow_other_project,
+    )
+    return network_sync(
+        store, remote_name, transport,
+        allow_other_project=allow_other_project,
+    )
+
+
+def cmd_network_register(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    agent, _ = detect_agent(args.agent, root=root)
+    result = network_register(
+        store, remote_name, create_transport(config, root), args.agent_id,
+        args.name, agent, allow_other_project=args.allow_other_project,
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        profile = result["profile"]
+        print("registered {} ({}) on {}".format(
+            profile["agent_id"], profile["display_name"], remote_name
+        ))
+        print("capabilities: {}".format(
+            ", ".join(profile["capabilities"]) or "(none declared)"
+        ))
+    return 0
+
+
+def cmd_network_agents(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    agents = network_list_agents(
+        store, create_transport(config, root),
+        allow_other_project=args.allow_other_project,
+    )
+    if args.json:
+        print(json.dumps({"remote": remote_name, "agents": agents}, indent=2,
+                         ensure_ascii=False))
+    elif not agents:
+        print("(no agents registered)")
+    else:
+        for agent_id, profile in agents.items():
+            print("{:<20} {:<24} {}".format(
+                agent_id, profile.get("display_name") or "",
+                ", ".join(profile.get("capabilities") or []) or "(none)",
+            ))
+    return 0
+
+
+def cmd_network_send(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    branch = args.branch or store.current_branch()
+    if not branch:
+        raise NetworkError("detached Context HEAD has no branch to send")
+    result = network_send(
+        store, remote_name, create_transport(config, root), args.recipient,
+        branch, message=args.message, expires_hours=args.expires_hours,
+        allow_other_project=args.allow_other_project,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        handoff = result["handoff"]
+        print("sent {} to {} via {}".format(
+            handoff["handoff_id"], handoff["to_agent"], remote_name
+        ))
+        print("Context: {} ({})".format(
+            handoff["context_id"], handoff["context_branch"]
+        ))
+        compat = handoff["compatibility"]
+        print("recipient compatibility: {}%{}".format(
+            compat["percent"],
+            " · missing " + ", ".join(compat["missing"])
+            if compat["missing"] else "",
+        ))
+    return 0
+
+
+def _print_network_items(items, heading):
+    print(heading)
+    if not items:
+        print("  (none)")
+        return
+    for item in items:
+        receipts = item.get("receipts") or []
+        status = receipts[-1]["status"] if receipts else "pending"
+        print("  {}  {} → {}  {}  [{}]".format(
+            item["handoff_id"], item["from_agent"], item["to_agent"],
+            item["context_id"], status,
+        ))
+        if item.get("message"):
+            print("    {}".format(item["message"]))
+
+
+def cmd_network_inbox(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    synced = _network_sync(store, remote_name, config, args.allow_other_project)
+    items = network_inbox(store, synced)
+    payload = {
+        "remote": remote_name, "objects_received": synced["objects_received"],
+        "identity": store.network_identity(), "handoffs": items,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        _print_network_items(items, "Inbox for {}".format(
+            payload["identity"]["agent_id"]
+        ))
+        print("network objects received: {}".format(synced["objects_received"]))
+    return 0
+
+
+def cmd_network_accept(root, args):
+    store = _require_store(root)
+    result = network_accept(
+        store, args.handoff_id, branch=args.branch, switch=args.switch,
+    )
+    if result["switched"]:
+        _refresh_handoff(root, store)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("accepted {} as branch {} at {}".format(
+            result["handoff_id"], result["branch"], result["context_id"]
+        ))
+        if result["switched"]:
+            print("switched Context HEAD to {}".format(result["branch"]))
+        print("publish acknowledgement with: context-git network reply {} accepted".format(
+            result["handoff_id"]
+        ))
+    return 0
+
+
+def cmd_network_reply(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    result = network_reply(
+        store, remote_name, create_transport(config, root), args.handoff_id,
+        args.status, message=args.message,
+        allow_other_project=args.allow_other_project,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        receipt = result["receipt"]
+        print("published {} receipt {} for {}".format(
+            receipt["status"], receipt["receipt_id"], receipt["handoff_id"]
+        ))
+    return 0
+
+
+def cmd_network_status(root, args):
+    store = _require_store(root)
+    remote_name, config = _network_remote(store, args.remote)
+    synced = _network_sync(store, remote_name, config, args.allow_other_project)
+    items = network_sent_status(store, synced, args.handoff_id)
+    if args.json:
+        print(json.dumps({"remote": remote_name, "handoffs": items}, indent=2,
+                         ensure_ascii=False))
+    else:
+        _print_network_items(items, "Sent handoffs")
     return 0
 
 
@@ -1251,6 +1451,71 @@ def build_parser():
                    help="allow sync with a mismatched project identity")
     p.set_defaults(func=cmd_pull)
 
+    p = sub.add_parser(
+        "network", parents=[common],
+        help="Agent identities, directed Context handoffs, and receipts",
+    )
+    network_sub = p.add_subparsers(dest="network_action")
+    p.set_defaults(func=cmd_network_root, network_parser=p)
+
+    np = network_sub.add_parser("register", parents=[common],
+                                help="register/update this Agent identity")
+    np.add_argument("agent_id", help="stable lowercase network id")
+    np.add_argument("--name", help="human-readable display name")
+    np.add_argument("--agent", help="capability adapter (default: auto-detect)")
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.add_argument("--force", action="store_true",
+                    help="intentionally take over an existing Agent id")
+    np.set_defaults(func=cmd_network_register)
+
+    np = network_sub.add_parser("agents", parents=[common],
+                                help="list registered network Agents")
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.set_defaults(func=cmd_network_agents)
+
+    np = network_sub.add_parser("send", parents=[common],
+                                help="send a published Context to one Agent")
+    np.add_argument("recipient", help="registered recipient Agent id")
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("--branch", help="published local Context branch (default: current)")
+    np.add_argument("-m", "--message", help="short outcome/intent, never a transcript")
+    np.add_argument("--expires-hours", type=int,
+                    help="optional handoff expiry, 1..8760 hours")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.set_defaults(func=cmd_network_send)
+
+    np = network_sub.add_parser("inbox", parents=[common],
+                                help="sync and list handoffs addressed to this Agent")
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.set_defaults(func=cmd_network_inbox)
+
+    np = network_sub.add_parser("accept", parents=[common],
+                                help="create a local Context branch from a handoff")
+    np.add_argument("handoff_id")
+    np.add_argument("--branch", help="local branch name (default: handoff/SENDER/ID)")
+    np.add_argument("--switch", action="store_true",
+                    help="also switch Context HEAD; source Git remains untouched")
+    np.set_defaults(func=cmd_network_accept)
+
+    np = network_sub.add_parser("reply", parents=[common],
+                                help="publish an immutable handoff receipt")
+    np.add_argument("handoff_id")
+    np.add_argument("status", choices=("accepted", "completed", "rejected"))
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("-m", "--message", help="short receipt outcome")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.set_defaults(func=cmd_network_reply)
+
+    np = network_sub.add_parser("status", parents=[common],
+                                help="sync receipts for sent handoffs")
+    np.add_argument("handoff_id", nargs="?")
+    np.add_argument("--remote", help="Context remote (default: origin or only remote)")
+    np.add_argument("--allow-other-project", action="store_true")
+    np.set_defaults(func=cmd_network_status)
+
     p = sub.add_parser("verify", parents=[common], help="residual secret scan over the store")
     p.add_argument("ctx_id", nargs="?", default=None, help="scan one context only")
     p.set_defaults(func=cmd_verify, set=[], no_prompt=True, message=None,
@@ -1358,6 +1623,9 @@ def main(argv=None):
     except RemoteError as exc:
         eprint("remote refused: {}".format(exc))
         return 5
+    except NetworkError as exc:
+        eprint("network refused: {}".format(exc))
+        return 6
     except KeyboardInterrupt:
         eprint("\ninterrupted.")
         return 130

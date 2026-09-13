@@ -35,11 +35,24 @@ REMOTE_VERSION = "1.0"
 MAX_REMOTE_OBJECTS = 10000
 MAX_CONTEXT_BYTES = 5 * 1024 * 1024
 MAX_MANIFEST_BYTES = 5 * 1024 * 1024
+MAX_NETWORK_OBJECT_BYTES = 1024 * 1024
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+NETWORK_OBJECT_ID_RE = re.compile(r"^(?:hnd|rcp)_[0-9a-f]{16}$")
 
 
 class RemoteError(Exception):
     """Safe, user-facing remote protocol or transport failure."""
+
+
+def _validate_network_object_key(kind, object_id):
+    if kind not in ("handoffs", "receipts"):
+        raise RemoteError("invalid network object kind")
+    prefix = "hnd_" if kind == "handoffs" else "rcp_"
+    if (
+        not NETWORK_OBJECT_ID_RE.match(str(object_id or ""))
+        or not str(object_id).startswith(prefix)
+    ):
+        raise RemoteError("invalid network object id")
 
 
 def _canonical_bytes(value):
@@ -316,6 +329,8 @@ class FileTransport:
         self.root = Path(path).resolve()
         self.manifest_path = self.root / "manifest.json"
         self.contexts_dir = self.root / "contexts"
+        self.network_manifest_path = self.root / "network.json"
+        self.network_dir = self.root / "network"
 
     def read_manifest(self, required=False):
         if self.manifest_path.is_symlink():
@@ -332,6 +347,8 @@ class FileTransport:
         return validate_manifest(manifest), _digest(manifest)
 
     def read_object(self, ctx_id):
+        if not CTX_ID_RE.match(str(ctx_id or "")):
+            raise RemoteError("invalid remote Context id")
         path = self.contexts_dir / (ctx_id + ".json")
         if self.contexts_dir.is_symlink() or path.is_symlink():
             raise RemoteError("refusing a symlinked remote object")
@@ -378,6 +395,74 @@ class FileTransport:
             except OSError:
                 pass
 
+    def read_network_manifest(self, required=False):
+        if self.network_manifest_path.is_symlink():
+            raise RemoteError("refusing a symlinked network manifest")
+        if not self.network_manifest_path.is_file():
+            if required:
+                raise RemoteError("remote has no Agent Context Network")
+            return None, None
+        try:
+            data = self.network_manifest_path.read_bytes()
+        except OSError:
+            raise RemoteError("network manifest cannot be read")
+        manifest = _decode_json(data, MAX_MANIFEST_BYTES, "network manifest")
+        return manifest, _digest(manifest)
+
+    def read_network_object(self, kind, object_id):
+        _validate_network_object_key(kind, object_id)
+        directory = self.network_dir / kind
+        path = directory / (object_id + ".json")
+        if self.network_dir.is_symlink() or directory.is_symlink() or path.is_symlink():
+            raise RemoteError("refusing a symlinked network object")
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise RemoteError("remote network object is missing: {}".format(object_id))
+        return _decode_json(data, MAX_NETWORK_OBJECT_BYTES, "network object {}".format(object_id))
+
+    def write_network(self, objects, manifest, expected_state):
+        self.root.mkdir(parents=True, exist_ok=True)
+        if self.network_dir.is_symlink() or self.network_manifest_path.is_symlink():
+            raise RemoteError("refusing unsafe symlinks in the network remote")
+        lock_path = self.root / ".context-git.lock"
+        try:
+            descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            raise RemoteError("remote is locked by another writer; retry later")
+        try:
+            os.write(descriptor, "{} {}\n".format(os.getpid(), utc_now_iso()).encode("ascii"))
+            os.close(descriptor)
+            _, current_state = self.read_network_manifest(required=False)
+            if current_state != expected_state:
+                raise RemoteError("network changed during update; sync and retry")
+            for kind in ("handoffs", "receipts"):
+                directory = self.network_dir / kind
+                if directory.is_symlink():
+                    raise RemoteError("refusing a symlinked network object directory")
+                directory.mkdir(parents=True, exist_ok=True)
+                for object_id, obj in (objects.get(kind) or {}).items():
+                    _validate_network_object_key(kind, object_id)
+                    target = directory / (object_id + ".json")
+                    if target.is_symlink():
+                        raise RemoteError("refusing a symlinked network object")
+                    if target.exists():
+                        existing = read_json(target)
+                        if existing is None or _digest(existing) != _digest(obj):
+                            raise RemoteError("network object collision: {}".format(object_id))
+                        continue
+                    write_json(target, obj)
+            write_json(self.network_manifest_path, manifest)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
 
 class _NoRedirect(request.HTTPRedirectHandler):
     """Prevent bearer credentials from crossing the configured origin."""
@@ -392,6 +477,8 @@ class HttpTransport:
         self.auth_env = auth_env
         self.etag = None
         self.manifest_exists = False
+        self.network_etag = None
+        self.network_manifest_exists = False
         self._opener = request.build_opener(_NoRedirect)
 
     def _headers(self):
@@ -410,7 +497,12 @@ class HttpTransport:
         try:
             with self._opener.open(req, timeout=20) as response:
                 length = response.headers.get("Content-Length")
-                limit = MAX_MANIFEST_BYTES if path.endswith("manifest.json") else MAX_CONTEXT_BYTES
+                if path.endswith(("manifest.json", "network.json")):
+                    limit = MAX_MANIFEST_BYTES
+                elif path.startswith("/network/"):
+                    limit = MAX_NETWORK_OBJECT_BYTES
+                else:
+                    limit = MAX_CONTEXT_BYTES
                 if length and int(length) > limit:
                     raise RemoteError("remote response exceeds the size limit")
                 body = response.read(limit + 1)
@@ -440,6 +532,8 @@ class HttpTransport:
         return manifest, self.etag or _digest(manifest)
 
     def read_object(self, ctx_id):
+        if not CTX_ID_RE.match(str(ctx_id or "")):
+            raise RemoteError("invalid remote Context id")
         data, _ = self._request("GET", "/contexts/{}.json".format(ctx_id))
         return _decode_json(data, MAX_CONTEXT_BYTES, "remote object {}".format(ctx_id))
 
@@ -457,6 +551,43 @@ class HttpTransport:
         elif expected_state is None:
             headers["If-None-Match"] = "*"
         self._request("PUT", "/manifest.json", data=_canonical_bytes(manifest), headers=headers)
+
+    def read_network_manifest(self, required=False):
+        data, headers = self._request("GET", "/network.json", missing_ok=not required)
+        if data is None:
+            self.network_manifest_exists = False
+            self.network_etag = None
+            if required:
+                raise RemoteError("remote has no Agent Context Network")
+            return None, None
+        manifest = _decode_json(data, MAX_MANIFEST_BYTES, "network manifest")
+        self.network_manifest_exists = True
+        self.network_etag = headers.get("ETag")
+        return manifest, self.network_etag or _digest(manifest)
+
+    def read_network_object(self, kind, object_id):
+        _validate_network_object_key(kind, object_id)
+        data, _ = self._request("GET", "/network/{}/{}.json".format(kind, object_id))
+        return _decode_json(
+            data, MAX_NETWORK_OBJECT_BYTES, "network object {}".format(object_id)
+        )
+
+    def write_network(self, objects, manifest, expected_state):
+        for kind in ("handoffs", "receipts"):
+            for object_id, obj in (objects.get(kind) or {}).items():
+                _validate_network_object_key(kind, object_id)
+                self._request(
+                    "PUT", "/network/{}/{}.json".format(kind, object_id),
+                    data=_canonical_bytes(obj), headers={"Content-Type": "application/json"},
+                )
+        headers = {"Content-Type": "application/json"}
+        if self.network_etag:
+            headers["If-Match"] = self.network_etag
+        elif self.network_manifest_exists:
+            raise RemoteError("HTTPS network remote must provide an ETag for safe updates")
+        elif expected_state is None:
+            headers["If-None-Match"] = "*"
+        self._request("PUT", "/network.json", data=_canonical_bytes(manifest), headers=headers)
 
 
 def create_transport(remote_config, project_root):

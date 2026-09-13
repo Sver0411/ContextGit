@@ -23,6 +23,7 @@ from pathlib import Path
 from .common import read_json, write_json, write_text
 
 CTX_ID_RE = re.compile(r"^ctx_[0-9a-f]{8,16}$")
+NETWORK_ID_RE = re.compile(r"^(?:hnd|rcp)_[0-9a-f]{16}$")
 BRANCH_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -43,6 +44,9 @@ class Store:
         self.contexts_dir = self.dir / "contexts"
         self.refs_dir = self.dir / "refs" / "heads"
         self.remote_refs_dir = self.dir / "refs" / "remotes"
+        self.network_dir = self.dir / "network"
+        self.network_handoffs_dir = self.network_dir / "handoffs"
+        self.network_receipts_dir = self.network_dir / "receipts"
         self.head_file = self.dir / "HEAD"
         self.config_file = self.dir / "config.json"
 
@@ -60,7 +64,7 @@ class Store:
             write_text(self._ref_path("main"), "")
             self._write_symbolic_head("main", None)
         config = {
-            "version": 3,
+            "version": 4,
             "created_at": utc_now_iso(),
             "tool": {"name": tool_name, "version": tool_version},
             "notes": "Append-only context store. Do not commit secrets into "
@@ -310,6 +314,89 @@ class Store:
             config_version = 1
         current["version"] = max(3, config_version)
         self.save_config(current)
+
+    def network_identity(self):
+        network = self.load_config().get("network") or {}
+        identity = network.get("identity") if isinstance(network, dict) else None
+        return dict(identity) if isinstance(identity, dict) else None
+
+    def set_network_identity(self, identity):
+        current = self.load_config()
+        network = current.get("network")
+        if not isinstance(network, dict):
+            network = {}
+        network["identity"] = dict(identity)
+        current["network"] = network
+        try:
+            config_version = int(current.get("version") or 1)
+        except (TypeError, ValueError):
+            config_version = 1
+        current["version"] = max(4, config_version)
+        self.save_config(current)
+
+    def clear_network_identity(self, remote=None):
+        current = self.load_config()
+        network = current.get("network")
+        if not isinstance(network, dict) or not isinstance(network.get("identity"), dict):
+            return False
+        if remote is not None and network["identity"].get("remote") != remote:
+            return False
+        del network["identity"]
+        if network:
+            current["network"] = network
+        else:
+            current.pop("network", None)
+        self.save_config(current)
+        return True
+
+    def _network_object_path(self, kind, object_id):
+        if kind not in ("handoffs", "receipts"):
+            raise StoreError("invalid network object kind")
+        prefix = "hnd_" if kind == "handoffs" else "rcp_"
+        if not NETWORK_ID_RE.match(str(object_id or "")) or not str(object_id).startswith(prefix):
+            raise StoreError("invalid network object id")
+        directory = self.network_dir / kind
+        if self.network_dir.is_symlink() or directory.is_symlink():
+            raise StoreError("refusing symlinked network cache")
+        return directory / (str(object_id) + ".json")
+
+    def save_network_object(self, kind, obj):
+        key = "handoff_id" if kind == "handoffs" else "receipt_id"
+        object_id = obj.get(key) if isinstance(obj, dict) else None
+        path = self._network_object_path(kind, object_id)
+        if path.is_symlink():
+            raise StoreError("refusing symlinked network object")
+        if path.exists():
+            existing = read_json(path)
+            if existing != obj:
+                raise StoreError("network object {} is immutable".format(object_id))
+            return False
+        write_json(path, obj)
+        return True
+
+    def load_network_object(self, kind, object_id):
+        path = self._network_object_path(kind, object_id)
+        if path.is_symlink():
+            return None
+        data = read_json(path)
+        key = "handoff_id" if kind == "handoffs" else "receipt_id"
+        return data if data is not None and data.get(key) == object_id else None
+
+    def list_network_objects(self, kind):
+        directory = self.network_dir / kind
+        if not directory.is_dir() or directory.is_symlink():
+            return []
+        values = []
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink():
+                continue
+            try:
+                obj = self.load_network_object(kind, path.stem)
+            except StoreError:
+                continue
+            if obj is not None:
+                values.append(obj)
+        return values
 
     def remove_remote(self, name):
         name = self.validate_remote_name(name)
@@ -580,6 +667,8 @@ class Store:
             "branch": self.current_branch(),
             "branch_count": len(self.list_branches()),
             "remote_count": len(self.remotes()),
+            "network_handoff_count": len(self.list_network_objects("handoffs")),
+            "network_receipt_count": len(self.list_network_objects("receipts")),
             "oldest": ids[0] if ids else None,
             "newest": ids[-1] if ids else None,
         }
