@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Sver0411/ContextGit/main/schemas/uacp-remote-1.0.schema.json",
+  "title": "Context Git Remote Manifest",
+  "description": "Version 1.0 manifest for transporting immutable UACP Context Objects and Context branch tips.",
+  "type": "object",
+  "required": ["format", "version", "protocol", "updated_at", "project", "refs", "objects"],
+  "additionalProperties": true,
+  "properties": {
+    "format": { "const": "context-git-remote" },
+    "version": { "const": "1.0" },
+    "protocol": { "const": "UACP/1.0" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "project": {
+      "type": "object",
+      "required": ["name", "repository_fingerprint"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "repository_fingerprint": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^sha256:[0-9a-f]{24}$" }
+          ],
+          "description": "Privacy-preserving identity derived from a normalized source Git origin URL when available."
+        }
+      }
+    },
+    "refs": {
+      "type": "object",
+      "required": ["heads"],
+      "additionalProperties": true,
+      "properties": {
+        "heads": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,179}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^ctx_[0-9a-f]{8,16}$"
+          }
+        }
+      }
+    },
+    "objects": {
+      "type": "object",
+      "maxProperties": 10000,
+      "propertyNames": { "pattern": "^ctx_[0-9a-f]{8,16}$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["sha256", "size"],
+        "additionalProperties": true,
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5242880
+          }
+        }
+      }
+    }
+  }
+}

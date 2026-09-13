@@ -1,6 +1,6 @@
 ---
 name: context-git
-description: Git for AI Agent Context — version, branch, semantically merge, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save progress, compare or merge parallel agent work, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
+description: Git for AI Agent Context — version, branch, semantically merge, securely sync, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save or sync progress, compare or merge parallel agent work, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
 ---
 
 # Context Git
@@ -30,6 +30,7 @@ Resume (adopt existing context):
 Inspect:
 - "context diff" / "what changed since last snapshot" / "context log" / "drift"
 - "context branch" / "并行方案" / "merge agent context" / "合并上下文"
+- "push/pull context" / "同步上下文" / "remote context" / "跨机器接手"
 
 ## Export workflow (snapshot / commit)
 
@@ -121,6 +122,37 @@ Git refs.
 with `switch -c NAME` before committing. Deleting a context branch deletes only
 its ref; immutable context objects remain in `contexts/`.
 
+## V4 remote sync workflow
+
+Context remotes are separate from source Git remotes. Use remote operations
+only when the user asks to publish, fetch, pull, sync, or transfer Context
+state; ordinary snapshot/resume commands remain local.
+
+1. Inspect configured endpoints with `remote` / `remote show NAME`. Add a
+   local shared directory outside the project, or an HTTPS endpoint with
+   `remote add origin URL`. For auth, pass `--auth-env NAME`; never put a
+   token value in a URL, command, config, Context field, or response.
+2. Before publishing, run `verify`, then `push [REMOTE] [BRANCH] --dry-run`.
+   A real push sends portable Context Objects only — no source files or raw
+   sessions — and updates a separate Context remote ref.
+3. Use `fetch` when the user wants to inspect remote work without changing a
+   local branch. Inspect with `branch --all`, `show remote:NAME/BRANCH`, or a
+   merge preview.
+4. Use `pull` only on the same-named current Context branch. It may
+   fast-forward but never auto-merges divergence. On divergence, preview
+   `merge remote:NAME/BRANCH --dry-run`, obtain explicit choices for real
+   conflicts, merge, verify, and then push.
+5. Never use `push --force` unless the user explicitly chose to rewrite the
+   remote Context ref. Immutable remote objects remain, but other agents may
+   lose the advertised branch tip.
+6. After fetching on another machine, run `status` or `resume`; observed
+   evidence is re-evaluated against that machine's working tree.
+
+External plain HTTP is forbidden. `--allow-insecure-http` is only for an
+explicit localhost test service. `--allow-other-project` is likewise an
+explicit override, not a recovery default. Remote failures exit 5 and should
+be resolved without hand-editing manifests, objects, or refs.
+
 ## Drift / status / diff / log
 
 - `status` — is the current context still fresh? (run before resuming work)
@@ -133,6 +165,10 @@ its ref; immutable context objects remain in `contexts/`.
 - `branch [NAME] [START]` / `branch -d NAME` — list, create, or delete refs
 - `switch NAME` / `switch -c NAME [--start REV]` — change context branch
 - `merge SOURCE [--dry-run]` — fast-forward or three-way semantic merge
+- `remote [add|show|remove]` — manage Context-only remote endpoints
+- `push [REMOTE] [BRANCH]` — publish an immutable Context DAG and branch tip
+- `fetch [REMOTE]` — verify objects and refresh remote-tracking refs
+- `pull [REMOTE] [BRANCH]` — fetch and fast-forward only
 
 ## Security rules (hard)
 
@@ -144,6 +180,9 @@ its ref; immutable context objects remain in `contexts/`.
   import or discovery. Ordinary context operations must remain session-blind.
 - The tool writes only inside `.context-git/`. If you find yourself editing
   project files "for the handoff", stop — that is a violation.
+- Remote sync is the only exception to local-only writes: when explicitly
+  requested, it may write the configured Context remote. It must never mutate
+  source Git state or upload project/session content.
 
 ## Failure handling
 
@@ -154,6 +193,10 @@ its ref; immutable context objects remain in `contexts/`.
   `--allow-empty` only for explicit checkpoints.
 - Corrupt context JSON → treat as missing; re-snapshot; do not hand-edit
   stored contexts.
+- Remote non-fast-forward → fetch and semantic-merge the tracking ref; never
+  force unless the user explicitly chose ref replacement.
+- Remote credential missing → ask the user to supply the configured
+  environment variable outside Context Git; never request or store its value.
 - Large repos → fine: collection is git-driven and ignore-listed
   (node_modules, dist, .venv, … are never walked); files above 5 MiB and
   symbolic links are not fingerprinted.
@@ -168,6 +211,7 @@ its ref; immutable context objects remain in `contexts/`.
 4. No dumping the repo into `important_files` (5–20 files, with reasons).
 5. No trusting stale sections on resume; re-verify what drift flags.
 6. No modifying project code to make handoff easier.
-7. No `git commit` / `git push` / any repository mutation.
+7. No source `git commit` / `git push` / repository mutation. A requested
+   `context-git push` writes only the configured Context remote.
 8. No secrets in any field — the tool aborts, do not retry around it.
 9. No re-analysing the whole codebase on resume — the context is the map.

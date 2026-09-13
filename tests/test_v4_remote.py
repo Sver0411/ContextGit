@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from context_git import context as context_mod  # noqa: E402
 from context_git.gitstate import collect as git_collect  # noqa: E402
 from context_git.remote import (  # noqa: E402
+    FileTransport,
     HttpTransport,
     RemoteError,
     empty_manifest,
@@ -25,6 +26,7 @@ from context_git.remote import (  # noqa: E402
     portable_object,
     validate_context_object,
     validate_manifest,
+    _normalise_repository_url,
 )
 from context_git.storage import Store  # noqa: E402
 from helpers import TempRepoTest, cli  # noqa: E402
@@ -90,6 +92,9 @@ class TestRemoteProtocol(TempRepoTest):
         outside = Path(tempfile.mkdtemp(prefix="cgit-remote-"))
         self._tmpdirs.append(str(outside))
         self.assertEqual(normalise_remote_url(outside, root), outside.resolve().as_uri())
+        special = outside / "% shared"
+        special_url = normalise_remote_url(special, root)
+        self.assertEqual(FileTransport(special_url).root, special.resolve())
         with self.assertRaisesRegex(RemoteError, "outside"):
             normalise_remote_url(root / "shared", root)
         with self.assertRaisesRegex(RemoteError, "contain the project"):
@@ -115,12 +120,24 @@ class TestRemoteProtocol(TempRepoTest):
         with self.assertRaisesRegex(RemoteError, "environment variable"):
             make_remote_config("https://example.test/demo", root, "BAD-NAME")
 
+    def test_git_repository_identity_normalises_transport_schemes(self):
+        https = _normalise_repository_url("https://github.com/acme/demo.git")
+        ssh = _normalise_repository_url("git@github.com:acme/demo.git")
+        explicit = _normalise_repository_url("ssh://git@github.com:22/acme/demo.git")
+        self.assertEqual(https, "repo://github.com/acme/demo")
+        self.assertEqual(https, ssh)
+        self.assertEqual(https, explicit)
+
     def test_manifest_rejects_invalid_protocol_and_dangling_ref(self):
         manifest = empty_manifest({"name": "demo", "repository_fingerprint": None})
         bad_protocol = copy.deepcopy(manifest)
         bad_protocol["protocol"] = "UACP/99.0"
         with self.assertRaisesRegex(RemoteError, "protocol"):
             validate_manifest(bad_protocol)
+        bad_project = copy.deepcopy(manifest)
+        bad_project["project"]["repository_fingerprint"] = "sha256:short"
+        with self.assertRaisesRegex(RemoteError, "project identity"):
+            validate_manifest(bad_project)
         manifest["refs"]["heads"]["main"] = "ctx_12345678"
         with self.assertRaisesRegex(RemoteError, "missing object"):
             validate_manifest(manifest)
@@ -258,6 +275,9 @@ class TestFileRemoteCLI(TempRepoTest):
         cli(root, "push")
         ctx_id = self._head(root)
         self.assertIn("remotes/origin/main", cli(root, "branch", "--all").stdout)
+        replacement = self._remote()
+        cli(root, "remote", "add", "origin", str(replacement), "--force")
+        self.assertEqual(Store(root).list_remote_refs("origin"), {})
         cli(root, "remote", "remove", "origin")
         self.assertEqual(Store(root).remotes(), {})
         self.assertEqual(Store(root).list_remote_refs(), {})

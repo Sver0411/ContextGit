@@ -6,7 +6,7 @@ drift-check and resume an agent's *working state* — not chat history.
 Standard library only. Python 3.8+. Windows / macOS / Linux.
 """
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 
 PROTOCOL_NAME = "UACP"
 PROTOCOL_VERSION = "1.0"

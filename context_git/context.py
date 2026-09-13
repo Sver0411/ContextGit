@@ -365,7 +365,7 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
         "capabilities_required": _as_items(notes.get("capabilities_required")) or [],
         "recommended_actions": _as_items(notes.get("recommended_actions")),
         "security": {
-            "secret_guard": "context-git/3.0",
+            "secret_guard": "context-git/4.0",
             "redacted_on_write": True,
             "sensitive_files_read": False,
             "raw_session_stored": False,

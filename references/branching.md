@@ -51,11 +51,16 @@ context-git log --all
 ```
 
 `START`, `SOURCE`, and read-only revision arguments accept a context id or
-context branch name. `HEAD` names the active context.
+local context branch name. After V4 fetch, read/merge selectors also accept
+`remote:NAME/BRANCH`; `HEAD` names the active context.
 
 `branch --delete` deletes only the ref. It never deletes Context Objects.
 `checkout CONTEXT_ID` creates a detached inspection state; `switch -c NAME`
 is required before committing from it. Neither command touches Git state.
+
+Remote-tracking refs under `refs/remotes/` are fetch results, not writable
+local branches. Merge `remote:origin/main` into the current branch or create a
+local branch at that revision; do not edit tracking-ref files manually.
 
 ## Merge rules
 
@@ -129,4 +134,3 @@ context. If the source is already an ancestor, the merge is a no-op.
 Contexts with no common ancestor are refused by default. `--allow-unrelated`
 uses an empty base and should be reserved for an intentional reconciliation of
 separately initialized stores.
-

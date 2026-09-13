@@ -7,7 +7,7 @@
 Most handoff tools generate a document.<br>
 Context Git versions the working state itself.
 
-Snapshot · Branch · Semantic merge · Detect drift · Resume anywhere.
+Snapshot · Branch · Semantic merge · Secure sync · Detect drift · Resume anywhere.
 
 ```
 Codex
@@ -45,6 +45,7 @@ Context Git treats agent context like source code:
 | checkout | **Context Checkout** — inspect any past state (never touches your git repo) |
 | branch | **Context Branch** — explore competing plans without overwriting working state |
 | merge | **Semantic Merge** — reconcile outcomes, progress and constraints with a common ancestor |
+| remote | **Remote Context** — securely push/fetch immutable context history across machines |
 | status | **Drift Detection** — is the context still true against the live repo? |
 
 And it is honest about evidence: machine-observed facts (`git HEAD`,
@@ -93,6 +94,9 @@ context-git resume                # the agent-ready briefing (drift + capabiliti
 context-git checkout ctx_001      # move context HEAD back in time (git repo untouched)
 context-git switch -c experiment  # branch the working context, not the Git repository
 context-git merge experiment      # fast-forward or three-way semantic merge
+context-git remote add origin /path/outside/project/context-remote
+context-git push                  # publish the current Context branch
+context-git pull                  # fetch + fast-forward; never touches source Git
 context-git verify                # residual secret scan over the store
 context-git capabilities          # probe capabilities available in this environment
 
@@ -108,6 +112,49 @@ Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
 uses `validation.test=pass` form). Fields you don't restate are inherited
 from the parent context — commits are incremental, like good commit
 messages, not like re-writing the whole README.
+
+## V4 — Remote Context
+
+V4 synchronizes Context history without uploading source files, raw agent
+sessions, or source Git state. A remote contains immutable, portable Context
+Objects plus a small manifest of branch tips:
+
+```bash
+# A file remote may be a shared volume or synced folder outside the project.
+context-git remote add origin /Volumes/team/context-demo
+context-git push origin main
+
+# On another checkout of the same project:
+context-git remote add origin /Volumes/team/context-demo
+context-git pull origin main
+context-git branch --all                 # includes remotes/origin/main
+
+# Divergence is explicit and semantic.
+context-git fetch origin
+context-git merge remote:origin/main --dry-run
+context-git merge remote:origin/main --resolve current_objective=ours
+context-git push origin main
+```
+
+HTTPS remotes use a token from an environment variable; the value is never
+written to `.context-git/config.json`:
+
+```bash
+export CONTEXT_GIT_TOKEN="..."
+context-git remote add origin https://contexts.example.com/team/demo \
+  --auth-env CONTEXT_GIT_TOKEN
+context-git push
+```
+
+Push is fast-forward-only unless `--force` is deliberate. Pull fetches and
+then fast-forwards only; divergent histories stay intact and require
+`merge remote:NAME/BRANCH`. Remote objects replace machine-local repository
+roots with `.` while retaining the same Context id. The manifest records a
+full SHA-256 and size for every object, and all objects, lineage, project
+identity, and residual-secret checks pass before local refs move.
+
+See [`references/remote.md`](references/remote.md) for the HTTPS endpoint
+contract, concurrency rules, threat boundary, and deployment checklist.
 
 ## V3 — context branch and semantic merge
 
@@ -248,6 +295,8 @@ Recommended Next Step:
 More real output in [`examples/`](examples/).
 The complete V3 branch/conflict/merge run is in
 [`examples/branch-merge.example.txt`](examples/branch-merge.example.txt).
+The V4 two-machine/divergence flow is in
+[`examples/remote-sync.example.txt`](examples/remote-sync.example.txt).
 
 ## Protocol
 
@@ -260,6 +309,8 @@ Context Objects speak **UACP/1.0** (Universal Agent Context Protocol):
 - [`references/security.md`](references/security.md) — threat model and guarantees
 - [`references/adapters.md`](references/adapters.md) — V2 session formats and discovery boundaries
 - [`references/branching.md`](references/branching.md) — V3 refs, merge rules and conflict handling
+- [`references/remote.md`](references/remote.md) — V4 transports, refs, integrity and HTTP contract
+- [`schemas/uacp-remote-1.0.schema.json`](schemas/uacp-remote-1.0.schema.json) — remote manifest schema
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release changes
 
 Any tool that reads JSON can consume a context; the `protocol: "UACP"`
@@ -295,6 +346,7 @@ context-git/
 │   ├── storage.py          # .context-git/ store (HEAD, refs/heads, contexts/)
 │   ├── diff.py             # semantic diff engine
 │   ├── merge.py            # deterministic three-way context merge
+│   ├── remote.py           # file/HTTPS transport + verified push/fetch/pull
 │   ├── drift.py            # drift detection + validity + freshness
 │   ├── gitstate.py         # read-only git snapshots
 │   ├── project.py          # stack detection (evidence or "unknown")
@@ -304,7 +356,7 @@ context-git/
 │   ├── render.py           # HANDOFF.md / show / log / resume views
 │   ├── common.py           # ignore rules, fingerprints, safe IO
 │   └── adapters/           # codex / claude-code / opencode / cursor / gemini / generic
-├── schemas/uacp-1.0.schema.json
+├── schemas/                # Context Object + Remote Manifest JSON Schemas
 ├── references/             # protocol, schema, security, adapters, branching
 ├── examples/               # real generated artifacts
 └── tests/                  # stdlib unittest suite
@@ -321,20 +373,24 @@ context-git/
 | Gemini CLI | source & target | project-hash-scoped session import |
 | Any agent | both | contexts are plain JSON + Markdown; `generic` adapter is the floor |
 
-Store location is a plain directory: sync it, commit it, or copy it —
-no server, no lock-in.
+The local store remains a plain directory. V4 adds an interoperable file/HTTPS
+remote format without requiring a hosted service or coupling to source Git.
 
-## Known limitations (v3)
+## Known limitations (v4)
 
 - Merge is deterministic and structural rather than LLM-assisted. Two
   differently worded bullets may require an explicit resolution even when a
   human considers them equivalent.
-- Context refs are local files; concurrent processes do not yet have a
-  lock/transaction protocol. Avoid writing the same store simultaneously.
+- A single local `.context-git/` store still assumes one writer at a time.
+  File remotes serialize pushes with a lock; HTTPS services must implement
+  immutable object PUTs and ETag/conditional manifest updates.
 - Semantic diff is structural — deterministic, LLM-free; it matches reworded
   items by normalisation, not by meaning.
-- Drift reads the working tree of one machine; contexts are not remotely
-  syncable yet (copy the directory and re-run `status`).
+- Drift always describes the current machine. After pulling a portable
+  Context, run `status`/`resume` to re-evaluate its observations locally.
+- V4 has no remote deletion, pruning, encryption-at-rest, signatures, or
+  partial object negotiation. Fetch validates the complete advertised
+  manifest (up to 10,000 objects) before moving tracking refs.
 - Agent detection uses environment markers and can fall back to `generic`.
 - Session extraction is deterministic and LLM-free. Unstructured conversation
   becomes only goal/current objective; structured headings and checklists
@@ -349,8 +405,8 @@ no server, no lock-in.
 
 - **v1 — Context Versioning** ✓
 - **v2 — richer adapters** ✓
-- **v3 — context branch / merge** ✓ ← you are here
-- **v4 — remote contexts** (push/pull a context chain)
+- **v3 — context branch / merge** ✓
+- **v4 — remote contexts** ✓ ← you are here
 - **v5 — agent-to-agent context network**
 
 ## Development

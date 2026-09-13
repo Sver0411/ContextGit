@@ -16,6 +16,9 @@ where the edges are.
 | Redaction bug ships a secret anyway | leaked on disk | residual scan **before write** aborts the commit (`scan_object`), plus post-hoc `context-git verify` |
 | Context store committed to a public repo | historical leak | redaction runs at write time; we never "store now, scrub later" |
 | Private agent session contains prompts, secrets or reasoning | sensitive transcript persisted into a context | sessions are read only after an explicit import command; only compact work-state fields survive; private records and raw messages are discarded before context construction |
+| Remote contains a tampered/colliding object | false context accepted | Context id recomputation + full SHA-256/size verification before refs move |
+| Concurrent remote writers lose updates | branch history overwritten | file lock/state compare or HTTPS ETag conditional update; non-fast-forward refusal |
+| Bearer token leaks through config, output, or redirect | remote account compromise | config stores the environment-variable name only; values are never printed; redirects are refused |
 
 ## Layer 1 — path-level denial (before any read)
 
@@ -92,6 +95,26 @@ source file inside the repository is excluded from `important_files`.
 - Merge provenance contains context ids, a validated local ref name and
   resolution keys, never discarded branch contents or private transcripts.
 
+## V4 remote boundary
+
+- Remote commands transfer only already-redacted Context Objects and a
+  manifest. Source files, full diffs, private sessions, credentials, and
+  source Git objects/refs are never part of the wire format.
+- Transported copies replace `project.root` and `git.repo_root` with `.`.
+  Every object passes Context-id, parent-lineage, full-digest, size, and
+  residual-secret validation before refs advance.
+- A remote is bound to a privacy-preserving source-repository fingerprint
+  when a Git origin exists, otherwise to the detected project name.
+  Cross-project sync requires `--allow-other-project`.
+- File remotes must be outside and must not contain the project directory.
+  Network-host file URLs and symlinked manifest/object paths are refused.
+- HTTPS bearer values are read only from the configured environment variable
+  at request time. URL-embedded credentials, query/fragment data, redirects,
+  external plain HTTP, and missing credentials fail closed.
+- File remotes use an exclusive lock and state comparison. HTTPS remotes must
+  expose an ETag and honor `If-Match`/`If-None-Match`; `409`/`412` means retry
+  after fetching. Push is non-fast-forward by default.
+
 ## Guarantees
 
 1. Sensitive paths are never opened — not for hashing, not for listing.
@@ -101,6 +124,8 @@ source file inside the repository is excluded from `important_files`.
    touches git history (no commit/push/checkout/reset on the user's repo).
 5. Private sessions are never read implicitly and raw transcript content is
    never written to the context store.
+6. Remote sync never stores a configured bearer-token value and never follows
+   a response redirect with it.
 
 ## Known limits (honesty section)
 
@@ -118,3 +143,6 @@ source file inside the repository is excluded from `important_files`.
 * Third-party private session formats are not stable APIs. Preview every
   import with `--dry-run` after a tool upgrade and correct heuristic
   extraction with `--set`.
+* Transport integrity is not publisher authenticity. V4 does not sign or
+  encrypt Context Objects; use TLS, authenticated endpoints, access controls,
+  and encrypted storage where the deployment requires them.

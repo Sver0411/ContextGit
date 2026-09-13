@@ -2,6 +2,23 @@
 
 All notable changes to Context Git are documented here.
 
+## 4.0.0 — 2026-09-13
+
+- Added named Context remotes and `remote`, `push`, `fetch`, and `pull`
+  commands without coupling Context refs to source Git remotes.
+- Added local/file and HTTPS transports, including bearer-token lookup from a
+  named environment variable; credential values are never stored or printed.
+- Added a versioned remote manifest, immutable content-addressed objects,
+  portable path sanitisation, and full SHA-256 transport verification.
+- Added remote-tracking Context refs under `.context-git/refs/remotes/` and
+  support for `remote:NAME/BRANCH` in semantic merge.
+- Added fast-forward enforcement, explicit force pushes, project identity
+  checks, atomic file-remote updates, and ETag/conditional HTTPS updates.
+- Added fail-closed validation for malformed, incomplete, tampered, oversized,
+  secret-bearing, cross-project, redirected, and unsafe-path remote content.
+- Added end-to-end two-clone, divergence/merge, corruption, authentication,
+  file transport, and HTTP protocol coverage.
+
 ## 3.0.0 — 2026-09-13
 
 - Added independent context branches under `.context-git/refs/heads/` with

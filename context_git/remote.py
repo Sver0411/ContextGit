@@ -107,23 +107,33 @@ def _normalise_repository_url(value):
         return None
     if "://" in value:
         parts = parse.urlsplit(value)
+        scheme = parts.scheme.lower()
         host = (parts.hostname or "").lower()
         try:
             parsed_port = parts.port
         except ValueError:
             return None
+        if scheme == "file":
+            try:
+                return "file:" + str(Path(parse.unquote(parts.path)).resolve())
+            except OSError:
+                return "file:" + parts.path
+        if not host:
+            return None
+        if (scheme, parsed_port) in (("ssh", 22), ("https", 443), ("http", 80)):
+            parsed_port = None
         port = ":{}".format(parsed_port) if parsed_port else ""
         path = parts.path.rstrip("/")
         if path.endswith(".git"):
             path = path[:-4]
-        return "{}://{}{}{}".format(parts.scheme.lower(), host, port, path)
+        return "repo://{}{}{}".format(host, port, path)
     # SCP-like Git URL: user@host:owner/repo.git. Drop the user component.
     if ":" in value and not value.startswith(("/", "./", "../")):
         host, path = value.split(":", 1)
         host = host.rsplit("@", 1)[-1].lower()
         if path.endswith(".git"):
             path = path[:-4]
-        return "ssh://{}/{}".format(host, path)
+        return "repo://{}/{}".format(host, path)
     try:
         return "file:" + str(Path(value).expanduser().resolve())
     except OSError:
@@ -181,7 +191,18 @@ def validate_manifest(manifest):
     if manifest.get("protocol") != "UACP/1.0":
         raise RemoteError("unsupported remote Context protocol")
     project = manifest.get("project")
-    if not isinstance(project, dict) or not str(project.get("name") or "").strip():
+    if (
+        not isinstance(project, dict)
+        or not isinstance(project.get("name"), str)
+        or not project["name"].strip()
+        or len(project["name"]) > 200
+        or "repository_fingerprint" not in project
+    ):
+        raise RemoteError("remote manifest project identity is invalid")
+    fingerprint = project.get("repository_fingerprint")
+    if fingerprint is not None and not re.match(
+        r"^sha256:[0-9a-f]{24}$", str(fingerprint)
+    ):
         raise RemoteError("remote manifest project identity is invalid")
     refs = manifest.get("refs")
     if not isinstance(refs, dict):
@@ -283,7 +304,7 @@ def _decode_json(data, limit, label):
 
 class FileTransport:
     def __init__(self, url):
-        path = request.url2pathname(parse.unquote(parse.urlsplit(url).path))
+        path = request.url2pathname(parse.urlsplit(url).path)
         self.root = Path(path).resolve()
         self.manifest_path = self.root / "manifest.json"
         self.contexts_dir = self.root / "contexts"

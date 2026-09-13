@@ -1,0 +1,35 @@
+$ context-git remote add origin /Volumes/team/context-demo
+configured context remote origin → file:///Volumes/team/context-demo
+
+$ context-git push origin main
+pushed origin/main at ctx_a1b2c3d4
+objects: 3 new / 3 reachable
+
+# In another checkout of the same project:
+$ context-git pull origin main
+pulled origin/main: fast-forward ((unborn) → ctx_a1b2c3d4)
+
+$ context-git branch --all
+* main                     ctx_a1b2c3d4
+  remotes/origin/main      ctx_a1b2c3d4
+
+# Both machines created a new context from ctx_a1b2c3d4.
+$ context-git push origin main
+remote refused: push would be non-fast-forward; fetch and merge
+remote:origin/main first, or use --force intentionally
+
+$ context-git fetch origin
+fetched origin: 1 new object(s), 4 verified
+  remote:origin/main → ctx_5e6f7788
+
+$ context-git merge remote:origin/main --dry-run
+Context Merge Preview
+  conflict: current_objective
+
+$ context-git merge remote:origin/main --resolve current_objective=ours
+merged remote:origin/main into main as ctx_90abcdef
+parents: ctx_11223344, ctx_5e6f7788 · base: ctx_a1b2c3d4
+
+$ context-git push origin main
+pushed origin/main at ctx_90abcdef
+objects: 1 new / 6 reachable

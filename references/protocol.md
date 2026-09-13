@@ -1,6 +1,6 @@
 # UACP — Universal Agent Context Protocol
 
-Version 1.0 · status: stable (implemented by Context Git 1.x and 2.x)
+Version 1.0 · status: stable (implemented by Context Git 1.x–4.x)
 
 UACP defines what an AI agent's *working state* looks like when written
 down, how those snapshots form a history, how two snapshots are compared,
@@ -115,6 +115,28 @@ Given current `ours`, selected `theirs`, and their nearest common ancestor
 
 Unrelated roots MUST be refused by default. Merge previews MUST be read-only.
 
+### 4.3 Remote Context transport
+
+V4 implementations MAY synchronize the Context DAG through a separate,
+versioned remote manifest. Remote refs and transports are implementation
+capabilities; they do not change the UACP/1.0 Context Object schema.
+
+A conforming remote implementation:
+
+1. transfers portable copies with machine-local root paths removed;
+2. preserves and recomputes each Context id, including legacy scalar-parent
+   ids, and authenticates the full serialized object with SHA-256;
+3. verifies parent closure before moving a local or remote-tracking ref;
+4. protects remote updates against lost writes and non-fast-forwards;
+5. separates remote-tracking refs from writable local Context branches;
+6. validates project identity unless a cross-project operation is explicit;
+7. does not transfer P3 content, raw sessions, or source files; and
+8. does not mutate source Git state.
+
+The reference manifest/HTTPS contract is specified in `remote.md` and
+`schemas/uacp-remote-1.0.schema.json`. Unknown manifest fields SHOULD be
+ignored for forward compatibility.
+
 ## 5. Incremental commits
 
 Agents must not restate everything on every commit. Fields absent from the
@@ -221,15 +243,17 @@ Full threat model and guarantees: `security.md`.
 * Unknown fields MUST be ignored, not rejected — forward compatibility.
 * V3 branch/merge is an additive UACP/1.0 capability: legacy readers follow
   `parent_context_id`; V3 readers prefer `parent_context_ids` when present.
+* V4 remote sync is an additive transport capability. It does not embed
+  credentials or authoritative remote refs in immutable Context Objects.
 * The `extensions` slot (arbitrary JSON object) remains reserved for future
-  capability blocks such as encryption, signatures, and remote references.
+  capability blocks such as encryption and signatures.
 
 ## 12. Conformance
 
 A tool is UACP/1.0-conformant if it can, at minimum:
 
 1. produce a Context Object valid against the JSON Schema,
-2. link contexts via `parent_context_id` and maintain a HEAD pointer (V3
+2. link contexts via `parent_context_id` and maintain a HEAD pointer (V3+
    implementations additionally understand `parent_context_ids` and refs),
 3. refuse to store P3 content and redact secrets pre-write,
 4. compute a semantic diff between two of its own contexts,

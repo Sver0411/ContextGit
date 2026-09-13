@@ -843,12 +843,15 @@ def cmd_remote_list(root, args):
 def cmd_remote_add(root, args):
     store = _require_store(root)
     name = store.validate_remote_name(args.name)
-    if name in store.remotes() and not args.force:
+    replacing = name in store.remotes()
+    if replacing and not args.force:
         raise RemoteError("remote already exists: {}; use --force to replace it".format(name))
     config = make_remote_config(
         args.url, root, auth_env=args.auth_env,
         allow_insecure_http=args.allow_insecure_http,
     )
+    if replacing:
+        store.delete_remote_refs(name)
     store.set_remote(name, config)
     if args.json:
         print(json.dumps({"name": name, **config}, indent=2, ensure_ascii=False))
@@ -863,12 +866,15 @@ def cmd_remote_add(root, args):
 
 def cmd_remote_remove(root, args):
     store = _require_store(root)
-    store.delete_remote_refs(args.name)
-    store.remove_remote(args.name)
+    name = store.validate_remote_name(args.name)
+    if name not in store.remotes():
+        raise StoreError("unknown remote: {}".format(name))
+    store.delete_remote_refs(name)
+    store.remove_remote(name)
     if args.json:
-        print(json.dumps({"removed": args.name}, indent=2))
+        print(json.dumps({"removed": name}, indent=2))
     else:
-        print("removed context remote {} and its tracking refs".format(args.name))
+        print("removed context remote {} and its tracking refs".format(name))
         print("local Context Objects were retained")
     return 0
 
