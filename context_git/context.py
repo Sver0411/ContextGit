@@ -246,7 +246,8 @@ def _merge_unique(old, new):
 
 
 def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
-          message=None, session_import=None, excluded_paths=None):
+          message=None, session_import=None, excluded_paths=None,
+          parent_ids=None, context_branch=None, merge_info=None):
     """Build a full UACP Context Object from live state + agent notes.
 
     ``notes`` is a plain dict of agent/user-supplied fields. Fields not
@@ -305,12 +306,20 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
 
     project_name = _project_name(root, detection)
 
+    lineage = list(parent_ids) if parent_ids is not None else (
+        [parent_id] if parent_id else []
+    )
+    if lineage and parent_id != lineage[0]:
+        raise ValueError("parent_context_id must be the first parent_context_ids entry")
+
     payload = {
         "protocol": "UACP",
         "protocol_version": "1.0",
         "schema_version": "1.0",
         "context_id": None,           # filled below
         "parent_context_id": parent_id,
+        "parent_context_ids": lineage,
+        "context_branch": context_branch,
         "created_at": utc_now_iso(),
         "message": redact(str(message).strip()) if message else None,
         "source_agent": {
@@ -356,7 +365,7 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
         "capabilities_required": _as_items(notes.get("capabilities_required")) or [],
         "recommended_actions": _as_items(notes.get("recommended_actions")),
         "security": {
-            "secret_guard": "context-git/2.0",
+            "secret_guard": "context-git/3.0",
             "redacted_on_write": True,
             "sensitive_files_read": False,
             "raw_session_stored": False,
@@ -367,10 +376,11 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
             "fingerprints": fingerprints,
             "fingerprint_algorithm": "sha256:full-file-up-to-5MiB+size",
             "session_import": session_import,
+            "merge": merge_info,
         },
     }
 
-    payload["context_id"] = compute_context_id(payload, parent_id)
+    payload["context_id"] = compute_context_id(payload, parent_id, lineage)
     return payload
 
 
@@ -569,14 +579,17 @@ def _canonical(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def compute_context_id(payload, parent_id):
-    """ctx_<8hex> over (parent, timestamp, repo HEAD, canonical core payload).
+def compute_context_id(payload, parent_id, parent_ids=None):
+    """ctx_<8hex> over (parents, timestamp, repo HEAD, canonical core payload).
 
     Timestamp inclusion guarantees uniqueness even for identical states;
     the store also enforces uniqueness as a backstop.
     """
     h = hashlib.sha256()
-    h.update((parent_id or "root").encode("utf-8"))
+    lineage = list(parent_ids) if parent_ids is not None else (
+        [parent_id] if parent_id else []
+    )
+    h.update(_canonical(lineage or ["root"]).encode("utf-8"))
     h.update(payload["created_at"].encode("utf-8"))
     h.update(((payload.get("git") or {}).get("head") or "no-git").encode("utf-8"))
     h.update(_canonical(core_view(payload)).encode("utf-8"))

@@ -14,6 +14,9 @@ Commands:
     sessions                 discover project-matching private sessions (opt-in)
     import-session           create a context from an explicit private session
     capabilities             auto-profile the current agent environment
+    branch                   list/create/delete context branches
+    switch                   switch the active context branch
+    merge                    three-way merge another context branch
 
 Global flags: --root, --json, -q. Run from any directory inside the project.
 Standard library only.
@@ -33,6 +36,7 @@ from .context import build as build_context, is_meaningful_change
 from .capabilities import compatibility_report, detect_agent, load_adapters
 from .diff import semantic_diff, render as render_diff
 from .drift import check as drift_check, format_report
+from .merge import MergeError, merge_contexts
 from .render import handoff_md, log as render_log, resume_briefing, show as render_show
 from .security import redact, scan_object
 from .sessions import (
@@ -137,15 +141,18 @@ def _snapshot(root, args, require_change):
     notes.update(parse_set_args(args.set))
     notes.update(_interactive_notes(skip=args.no_prompt))
 
+    if store.current_branch() is None:
+        if store.refs_dir.is_dir():
+            current = store.head()
+            eprint(
+                "cannot commit from historical HEAD {} while context HEAD is detached."
+                .format(current or "(empty)")
+            )
+            eprint("Create a branch with `context-git switch -c NAME`, or use `checkout -`.")
+            return 1
+        store.ensure_branch_layout()
     parent = store.head_object()
     parent_id = parent.get("context_id") if parent else None
-    if parent_id and store.has_children(parent_id):
-        eprint(
-            "cannot create a v1 context from historical HEAD {}: it already has a child."
-            .format(parent_id)
-        )
-        eprint("Return to the latest context with `context-git checkout -` first.")
-        return 1
 
     supplied_agent = getattr(args, "source_agent_obj", None)
     if supplied_agent:
@@ -164,6 +171,8 @@ def _snapshot(root, args, require_change):
         session_import=getattr(args, "imported_session_meta", None),
         excluded_paths=[getattr(args, "imported_source_path", None)]
         if getattr(args, "imported_source_path", None) else None,
+        parent_ids=[parent_id] if parent_id else [],
+        context_branch=store.current_branch(),
     )
 
     # Security gate FIRST — even a no-op commit must never be the place a
@@ -267,6 +276,7 @@ def cmd_status(root, args):
         print(json.dumps({
             "context_id": ctx.get("context_id"),
             "created_at": ctx.get("created_at"),
+            "context_branch": store.current_branch(),
             "drift_level": drift["level"],
             "signals": drift["signals"],
             "stale_files": drift.get("stale_files", []),
@@ -278,6 +288,7 @@ def cmd_status(root, args):
 
     print("Context Git Status")
     print("  Current Context: {}".format(ctx.get("context_id")))
+    print("  Context Branch:  {}".format(store.current_branch() or "(detached)"))
     print("  Captured:        {}".format(ctx.get("created_at")))
     if ctx.get("message"):
         print("  Summary:         {}".format(ctx["message"]))
@@ -318,14 +329,16 @@ def cmd_diff(root, args):
             eprint("no contexts yet — nothing to diff.")
             return 1
     elif old_id and new_id:
-        old, new = store.load_context(old_id), store.load_context(new_id)
+        old_resolved, new_resolved = store.resolve(old_id), store.resolve(new_id)
+        old, new = store.load_context(old_resolved), store.load_context(new_resolved)
         if old is None or new is None:
             eprint("unknown context id(s): {} {}".format(
                 old_id if old is None else "", new_id if new is None else "").strip())
             return 1
     else:
         # one arg given: diff that context against its parent
-        target = store.load_context(old_id)
+        target_id = store.resolve(old_id)
+        target = store.load_context(target_id)
         if target is None:
             eprint("unknown context id: {}".format(old_id))
             return 1
@@ -346,14 +359,15 @@ def cmd_log(root, args):
     if not store.exists():
         eprint("no context store here — run `context-git init` first.")
         return 1
-    history = store.history(limit=args.limit)
-    print(render_log(history))
+    history = store.all_contexts(limit=args.limit) if args.all else store.history(limit=args.limit)
+    print(render_log(history, decorations=store.decorations()))
     return 0
 
 
 def cmd_show(root, args):
     store = Store(root)
-    ctx = store.load_context(args.ctx_id) if args.ctx_id else store.head_object()
+    resolved = store.resolve(args.ctx_id) if args.ctx_id else store.head()
+    ctx = store.load_context(resolved) if resolved else None
     if ctx is None:
         eprint("context not found: {}".format(args.ctx_id or "(HEAD)"))
         return 1
@@ -366,7 +380,8 @@ def cmd_show(root, args):
 
 def cmd_resume(root, args):
     store = Store(root)
-    ctx = store.load_context(args.ctx_id) if args.ctx_id else store.head_object()
+    resolved = store.resolve(args.ctx_id) if args.ctx_id else store.head()
+    ctx = store.load_context(resolved) if resolved else None
     if ctx is None:
         eprint("no context to resume ({}).".format(args.ctx_id or "HEAD is empty"))
         eprint("Run `context-git snapshot` in the source agent first.")
@@ -400,40 +415,272 @@ def cmd_resume(root, args):
 
 def cmd_checkout(root, args):
     store = Store(root)
-    target = args.target
-    current = store.head()
-    if target == "-":
-        target = store.recalled_position()
-        if not target:
-            eprint("no previous position to check out.")
-            return 1
-        if target == current:
-            eprint("already at {}.".format(target))
-            return 0
-    if target == current:
-        print("already at {}".format(target))
-        return 0
+    requested = args.target
+    current_position = store.position()
+    current_id = store.head()
+    restore = store.recalled_position() if requested == "-" else None
+    if requested == "-" and not restore:
+        eprint("no previous position to check out.")
+        return 1
+
     try:
-        store.set_head(target)  # validates existence
+        token = restore or requested
+        if token.startswith("branch:"):
+            branch = token.split(":", 1)[1]
+            target_id = store.switch_branch(branch)
+            label = branch
+        elif token.startswith("context:"):
+            target_id = token.split(":", 1)[1]
+            store.detach(target_id)
+            label = target_id
+        elif token in store.list_branches():
+            target_id = store.switch_branch(token)
+            label = token
+        else:
+            target_id = store.resolve(token)
+            if target_id is None:
+                raise StoreError("unknown context or branch: {}".format(token))
+            store.detach(target_id)
+            label = target_id
     except StoreError as exc:
         eprint(str(exc))
         return 1
-    store.remember_position(current)  # enables `checkout -`
+
+    if store.position() == current_position:
+        print("already at {}".format(label))
+        return 0
+    store.remember_position(current_position)
     ctx = store.head_object()
-    if ctx:
-        drift = drift_check(root, ctx)
-        agent, _ = detect_agent(None, root=root)
-        compat = compatibility_report(ctx, agent) \
-            if ctx.get("capabilities_required") else None
-        write_text(
-            store.dir / "HANDOFF.md",
-            handoff_md(ctx, drift_report=drift, compat=compat),
-        )
-    print("context HEAD → {}".format(target))
+    _refresh_handoff(root, store, ctx)
+    branch = store.current_branch()
+    print("context HEAD → {}{}".format(
+        target_id, " ({})".format(branch) if branch else " (detached)"
+    ))
     if ctx and not args.quiet:
         print("(`context-git show` to inspect · `checkout -` to return to {})".format(
-            current or "-"))
+            current_id or "-"))
     # Your git repository was not touched: checkout only moves the context pointer.
+    return 0
+
+
+def _refresh_handoff(root, store, ctx=None):
+    ctx = ctx or store.head_object()
+    if not ctx:
+        return
+    drift = drift_check(root, ctx)
+    agent, _ = detect_agent(None, root=root)
+    compat = compatibility_report(ctx, agent) \
+        if ctx.get("capabilities_required") else None
+    write_text(
+        store.dir / "HANDOFF.md",
+        handoff_md(ctx, drift_report=drift, compat=compat),
+    )
+
+
+def cmd_branch(root, args):
+    """List, create, or delete context refs."""
+    store = Store(root)
+    if not store.exists():
+        raise StoreError("no context store here — run `context-git init` first")
+    if store.current_branch() is None and not store.refs_dir.is_dir():
+        store.ensure_branch_layout()
+
+    if args.delete:
+        store.delete_branch(args.delete)
+        if args.json:
+            print(json.dumps({"deleted": args.delete}, indent=2))
+        else:
+            print("deleted context branch {} (contexts were retained)".format(args.delete))
+        return 0
+
+    if args.name:
+        start = store.resolve(args.start) if args.start else store.head()
+        if args.start and start is None:
+            raise StoreError("unknown start context or branch: {}".format(args.start))
+        store.create_branch(args.name, start)
+        if args.json:
+            print(json.dumps({"created": args.name, "context_id": start}, indent=2))
+        else:
+            print("created context branch {} at {}".format(args.name, start or "(unborn)"))
+        return 0
+
+    branches = store.list_branches()
+    current = store.current_branch()
+    if args.json:
+        print(json.dumps({
+            "current": current,
+            "branches": [
+                {"name": name, "context_id": ctx_id, "current": name == current}
+                for name, ctx_id in branches.items()
+            ],
+        }, indent=2, ensure_ascii=False))
+    else:
+        for name, ctx_id in branches.items():
+            print("{} {:24} {}".format(
+                "*" if name == current else " ", name, ctx_id or "(unborn)"
+            ))
+        if not branches:
+            print("(no context branches)")
+    return 0
+
+
+def cmd_switch(root, args):
+    """Switch context branches without touching source-control state."""
+    store = Store(root)
+    if not store.exists():
+        raise StoreError("no context store here — run `context-git init` first")
+    if store.current_branch() is None and not store.refs_dir.is_dir():
+        store.ensure_branch_layout()
+    previous = store.position()
+    if args.create:
+        start = store.resolve(args.start) if args.start else store.head()
+        if args.start and start is None:
+            raise StoreError("unknown start context or branch: {}".format(args.start))
+        store.create_branch(args.create, start)
+        target = args.create
+    else:
+        target = args.name
+    ctx_id = store.switch_branch(target)
+    if previous != store.position():
+        store.remember_position(previous)
+    _refresh_handoff(root, store)
+    if args.json:
+        print(json.dumps({"branch": target, "context_id": ctx_id}, indent=2))
+    else:
+        print("switched context branch to {} at {}".format(target, ctx_id or "(unborn)"))
+        print("source Git branch and working tree were not touched")
+    return 0
+
+
+def _parse_resolutions(items):
+    result = {}
+    for item in items or []:
+        if "=" not in item:
+            raise MergeError("resolution must be KEY=ours|theirs|base")
+        key, choice = item.rsplit("=", 1)
+        key, choice = key.strip(), choice.strip().lower()
+        if not key or choice not in ("ours", "theirs", "base"):
+            raise MergeError("resolution must be KEY=ours|theirs|base")
+        result[key] = choice
+    return result
+
+
+def _print_merge_plan(plan, source):
+    print("Context Merge")
+    print("  ours:   {}".format(plan.get("ours")))
+    print("  theirs: {} ({})".format(plan.get("theirs"), source))
+    print("  base:   {}".format(plan.get("base") or "(unrelated)"))
+    if plan.get("conflicts"):
+        print("  conflicts: {}".format(len(plan["conflicts"])))
+        for conflict in plan["conflicts"]:
+            print("    - {}".format(conflict["key"]))
+        print("Resolve explicitly with `--resolve KEY=ours|theirs|base`.")
+    else:
+        fields = [key for key, value in plan.get("notes", {}).items() if value]
+        print("  mergeable fields: {}".format(", ".join(fields) or "(empty state)"))
+
+
+def cmd_merge(root, args):
+    """Three-way merge a context branch or context id into the current branch."""
+    store = Store(root)
+    if not store.exists():
+        raise StoreError("no context store here — run `context-git init` first")
+    if store.current_branch() is None:
+        if not store.refs_dir.is_dir():
+            store.ensure_branch_layout()
+        else:
+            raise StoreError("cannot merge into detached context HEAD; switch to a branch first")
+    branch = store.current_branch()
+    ours_id = store.head()
+    theirs_id = store.resolve(args.source)
+    if ours_id is None:
+        raise StoreError("current context branch has no context")
+    if theirs_id is None:
+        raise StoreError("unknown context or branch: {}".format(args.source))
+    if ours_id == theirs_id or store.is_ancestor(theirs_id, ours_id):
+        message = "already up to date: {} contains {}".format(branch, args.source)
+        if args.json:
+            print(json.dumps({"action": "up-to-date", "context_id": ours_id}, indent=2))
+        else:
+            print(message)
+        return 0
+
+    if store.is_ancestor(ours_id, theirs_id) and not args.no_ff:
+        if args.dry_run:
+            payload = {"action": "fast-forward", "from": ours_id, "to": theirs_id,
+                       "branch": branch, "dry_run": True}
+            print(json.dumps(payload, indent=2) if args.json else
+                  "would fast-forward {}: {} → {}".format(branch, ours_id, theirs_id))
+            return 0
+        store.set_head(theirs_id)
+        _refresh_handoff(root, store)
+        if args.json:
+            print(json.dumps({"action": "fast-forward", "from": ours_id,
+                              "to": theirs_id, "branch": branch}, indent=2))
+        else:
+            print("fast-forwarded context branch {}: {} → {}".format(
+                branch, ours_id, theirs_id
+            ))
+        return 0
+
+    base_id = store.merge_base(ours_id, theirs_id)
+    if base_id is None and not args.allow_unrelated:
+        raise MergeError("contexts have no common ancestor; use --allow-unrelated intentionally")
+    base = store.load_context(base_id) if base_id else {}
+    ours = store.load_context(ours_id)
+    theirs = store.load_context(theirs_id)
+    resolutions = _parse_resolutions(args.resolve)
+    plan = merge_contexts(
+        base, ours, theirs, resolutions=resolutions, resolve_all=args.resolve_all
+    )
+
+    if args.dry_run or plan["conflicts"]:
+        if args.json:
+            preview = dict(plan)
+            preview["source"] = args.source
+            preview["dry_run"] = True
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+        else:
+            _print_merge_plan(plan, args.source)
+            if args.dry_run and not plan["conflicts"]:
+                print("No files were written (--dry-run).")
+        return 4 if plan["conflicts"] else 0
+
+    agent, how = detect_agent(getattr(args, "agent", None), root=root)
+    if not args.quiet:
+        eprint("[merge] agent: {} ({})".format(agent.get("name"), how))
+    merge_meta = {
+        "base_context_id": base_id,
+        "source_context_id": theirs_id,
+        "source_ref": args.source if args.source in store.list_branches() else None,
+        "strategy": "three-way",
+        "resolved_conflicts": plan["resolved"],
+    }
+    ctx = build_context(
+        root, plan["notes"],
+        parent_id=ours_id,
+        parent_ids=[ours_id, theirs_id],
+        parent_obj=ours,
+        source_agent=agent,
+        message=args.message or "Merge context {} into {}".format(args.source, branch),
+        context_branch=branch,
+        merge_info=merge_meta,
+    )
+    findings = scan_object(ctx)
+    if findings:
+        eprint("[merge] potential secrets detected; nothing written")
+        return 2
+    ctx_id = store.save_context(ctx)
+    store.set_head(ctx_id)
+    _refresh_handoff(root, store, ctx)
+    if args.json:
+        print(json.dumps({
+            "action": "merge", "context_id": ctx_id, "branch": branch,
+            "parents": [ours_id, theirs_id], "base": base_id,
+        }, indent=2))
+    else:
+        print("merged {} into {} as {}".format(args.source, branch, ctx_id))
+        print("parents: {}, {} · base: {}".format(ours_id, theirs_id, base_id or "none"))
     return 0
 
 
@@ -683,6 +930,8 @@ def build_parser():
 
     p = sub.add_parser("log", parents=[common], help="context history")
     p.add_argument("--limit", type=int, default=30, help="max entries (default 30)")
+    p.add_argument("--all", action="store_true",
+                   help="show contexts reachable from all branches")
     p.set_defaults(func=cmd_log, set=[], no_prompt=True, message=None,
                    allow_empty=False, agent=None, ctx_id=None,
                    targets=None, write_briefing=False)
@@ -706,6 +955,50 @@ def build_parser():
     p.set_defaults(func=cmd_checkout, set=[], no_prompt=True, message=None,
                    allow_empty=False, agent=None, ctx_id=None, limit=None,
                    targets=None, write_briefing=False)
+
+    p = sub.add_parser(
+        "branch", parents=[common],
+        help="list or create context branches (never touches Git branches)",
+    )
+    p.add_argument("name", nargs="?", help="new context branch name")
+    p.add_argument("start", nargs="?", help="start context or branch (default: HEAD)")
+    p.add_argument("-d", "--delete", metavar="NAME", help="delete a branch ref; keep contexts")
+    p.set_defaults(func=cmd_branch, set=[], no_prompt=True, message=None,
+                   allow_empty=False, agent=None, ctx_id=None, limit=None,
+                   targets=None, write_briefing=False)
+
+    p = sub.add_parser(
+        "switch", parents=[common],
+        help="switch context branches (never touches Git branches or files)",
+    )
+    switch_group = p.add_mutually_exclusive_group(required=True)
+    switch_group.add_argument("name", nargs="?", help="existing context branch")
+    switch_group.add_argument("-c", "--create", metavar="NAME",
+                              help="create and switch to a context branch")
+    p.add_argument("--start", help="start context or branch for --create")
+    p.set_defaults(func=cmd_switch, set=[], no_prompt=True, message=None,
+                   allow_empty=False, agent=None, ctx_id=None, limit=None,
+                   targets=None, write_briefing=False)
+
+    p = sub.add_parser(
+        "merge", parents=[common],
+        help="three-way merge a context branch into the current branch",
+    )
+    p.add_argument("source", help="context branch or context id to merge")
+    p.add_argument("-m", "--message", help="merge context summary")
+    p.add_argument("--no-ff", action="store_true",
+                   help="create a two-parent merge context even when fast-forward is possible")
+    p.add_argument("--dry-run", action="store_true",
+                   help="preview merge/conflicts without writing")
+    p.add_argument("--resolve", action="append", default=[], metavar="KEY=CHOICE",
+                   help="resolve one conflict with ours, theirs, or base; repeatable")
+    p.add_argument("--resolve-all", choices=("ours", "theirs", "base"),
+                   help="fallback resolution for every remaining conflict")
+    p.add_argument("--allow-unrelated", action="store_true",
+                   help="merge contexts without a common ancestor")
+    p.add_argument("--agent", default=None, help="source agent name override")
+    p.set_defaults(func=cmd_merge, set=[], no_prompt=True, allow_empty=False,
+                   ctx_id=None, limit=None, targets=None, write_briefing=False)
 
     p = sub.add_parser("verify", parents=[common], help="residual secret scan over the store")
     p.add_argument("ctx_id", nargs="?", default=None, help="scan one context only")
@@ -808,6 +1101,9 @@ def main(argv=None):
     except SessionImportError as exc:
         eprint("session import refused: {}".format(exc))
         return 2
+    except MergeError as exc:
+        eprint("merge refused: {}".format(exc))
+        return 4
     except KeyboardInterrupt:
         eprint("\ninterrupted.")
         return 130

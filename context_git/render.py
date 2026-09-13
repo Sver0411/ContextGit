@@ -62,6 +62,13 @@ def handoff_md(ctx, drift_report=None, compat=None):
         ctx.get("context_id"), ctx.get("created_at")))
     if ctx.get("parent_context_id"):
         L.append("> Parent context: `{}`".format(ctx["parent_context_id"]))
+    parents = ctx.get("parent_context_ids") or []
+    if len(parents) > 1:
+        L.append("> Merge parents: {}".format(
+            ", ".join("`{}`".format(parent) for parent in parents)
+        ))
+    if ctx.get("context_branch"):
+        L.append("> Context branch at creation: `{}`".format(ctx["context_branch"]))
     if ctx.get("message"):
         L.append("> Summary: {}".format(ctx["message"]))
     L.append("")
@@ -286,6 +293,11 @@ def show(ctx):
     L.append("Protocol  UACP/{}".format(ctx.get("protocol_version")))
     L.append("Created   {}".format(ctx.get("created_at")))
     L.append("Parent    {}".format(ctx.get("parent_context_id") or "(root)"))
+    parents = ctx.get("parent_context_ids") or []
+    if len(parents) > 1:
+        L.append("Parents   {}".format(", ".join(parents)))
+    if ctx.get("context_branch"):
+        L.append("Branch    {}".format(ctx["context_branch"]))
     if ctx.get("message"):
         L.append("Summary   {}".format(ctx["message"]))
     L.append("Project   {} ({})".format(
@@ -327,17 +339,24 @@ def show(ctx):
     return "\n".join(L)
 
 
-def log(history):
+def log(history, decorations=None):
     """History listing, newest first. ``history`` is newest-first chain."""
     L = []
     if not history:
         L.append("(no contexts yet — run `context-git snapshot`)")
         return "\n".join(L)
+    decorations = decorations or {}
     for ctx in history:
         summary = ctx.get("message") or ctx.get("current_objective") \
             or ctx.get("goal") or "(no summary)"
-        L.append("{}  {}  {}".format(
-            ctx.get("context_id"), (ctx.get("created_at") or "")[:19], redact(summary)))
+        ctx_id = ctx.get("context_id")
+        refs = decorations.get(ctx_id) or []
+        suffix = " ({})".format(", ".join(refs)) if refs else ""
+        L.append("{}{}  {}  {}".format(
+            ctx_id, suffix, (ctx.get("created_at") or "")[:19], redact(summary)))
+        parents = ctx.get("parent_context_ids") or []
+        if len(parents) > 1:
+            L.append("              merge parents {}".format(", ".join(parents)))
         prog = ctx.get("progress") or {}
         counts = "completed {} · in-progress {} · pending {}".format(
             len(prog.get("completed") or []),
