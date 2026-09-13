@@ -89,6 +89,7 @@ class TestContextBuild(TempRepoTest):
         ctx = context_mod.build(root, {})
         self.assertEqual(ctx["protocol"], "UACP")
         self.assertEqual(ctx["protocol_version"], "1.0")
+        self.assertEqual(ctx["schema_version"], "1.1")
         self.assertTrue(ctx["context_id"].startswith("ctx_"))
         self.assertRegex(ctx["context_id"], r"^ctx_[0-9a-f]{8}$")
 

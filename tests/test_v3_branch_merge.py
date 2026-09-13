@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from context_git import context as context_mod  # noqa: E402
+from context_git.gitstate import collect as git_collect  # noqa: E402
 from context_git.merge import MergeError, merge_contexts  # noqa: E402
 from context_git.storage import Store, StoreError  # noqa: E402
 from helpers import TempRepoTest, cli  # noqa: E402
@@ -134,6 +135,7 @@ class TestBranchMergeCLI(TempRepoTest):
 
     def test_divergent_merge_records_two_parents(self):
         root = self._repo()
+        git_before = git_collect(root)
         cli(root, "init")
         cli(root, "snapshot", "--no-prompt", "--set", "goal=Ship V3",
             "--set", "current_objective=base", "--set", "pending=shared task")
@@ -171,6 +173,12 @@ class TestBranchMergeCLI(TempRepoTest):
         log = cli(root, "log", "--all").stdout
         self.assertIn("merge parents", log)
         self.assertIn("main", log)
+        git_after = git_collect(root)
+        self.assertEqual(git_after["head"], git_before["head"])
+        self.assertEqual(git_after["branch"], git_before["branch"])
+        self.assertEqual(git_after["staged"], git_before["staged"])
+        self.assertEqual(git_after["unstaged"], git_before["unstaged"])
+        self.assertEqual(git_after["untracked"], git_before["untracked"])
 
     def test_fast_forward_and_branch_delete(self):
         root = self._repo()
@@ -205,4 +213,3 @@ class TestBranchMergeCLI(TempRepoTest):
 
 if __name__ == "__main__":
     unittest.main()
-

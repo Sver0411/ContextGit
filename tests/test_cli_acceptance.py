@@ -161,6 +161,27 @@ class TestAcceptance(TempRepoTest):
         proc = cli(root, "status", expect=1)
         self.assertIn("init", proc.stdout + proc.stderr)
 
+    def test_root_flag_works_before_or_after_subcommand(self):
+        root = self._demo_repo()
+        before = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent.parent /
+                                 "scripts" / "context_git.py"),
+             "--root", str(root), "init"],
+            cwd=str(Path(root).parent), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+        self.assertEqual(before.returncode, 0, before.stderr)
+        self.assertTrue((root / ".context-git").is_dir())
+        after = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent.parent /
+                                 "scripts" / "context_git.py"),
+             "status", "--root", str(root)],
+            cwd=str(Path(root).parent), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+        self.assertEqual(after.returncode, 1, after.stderr)
+        self.assertIn("Context Git Status", after.stdout)
+
     def test_agent_adapter_override(self):
         root = self._demo_repo()
         cli(root, "init")

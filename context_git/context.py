@@ -25,7 +25,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
+from . import SCHEMA_VERSION, __version__
 from .common import fingerprint, is_forbidden_path, iter_files, rel_posix
 from .gitstate import collect as git_collect
 from .project import detect as project_detect
@@ -315,7 +315,7 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
     payload = {
         "protocol": "UACP",
         "protocol_version": "1.0",
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "context_id": None,           # filled below
         "parent_context_id": parent_id,
         "parent_context_ids": lineage,

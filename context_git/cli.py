@@ -689,7 +689,11 @@ def cmd_verify(root, args):
     store = Store(root)
     targets = []
     if args.ctx_id:
-        targets.append(store.context_path(args.ctx_id))
+        resolved = store.resolve(args.ctx_id)
+        if resolved is None:
+            eprint("unknown context or branch: {}".format(args.ctx_id))
+            return 1
+        targets.append(store.context_path(resolved))
     else:
         targets = [store.context_path(cid) for cid in store.list_context_ids()]
         handoff = store.dir / "HANDOFF.md"
@@ -887,7 +891,11 @@ def build_parser():
     # Shared parent so global flags work *after* the subcommand too
     # (`context-git show --json`, not only `context-git --json show`).
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--root", default=".", help="project root (default: cwd)")
+    # SUPPRESS is important because these flags exist on both the top-level
+    # parser and every subparser. A subparser default must not overwrite a
+    # value supplied before the command (`--root DIR status`).
+    common.add_argument("--root", default=argparse.SUPPRESS,
+                        help="project root (default: cwd)")
     common.add_argument("--json", action="store_true",
                         help="machine-readable JSON output where supported")
     common.add_argument("-q", "--quiet", action="store_true", help="minimal output")
@@ -1091,7 +1099,7 @@ def main(argv=None):
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
-    root = Path(args.root).resolve()
+    root = Path(getattr(args, "root", ".")).resolve()
 
     try:
         return args.func(root, args)

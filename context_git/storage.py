@@ -152,9 +152,9 @@ class Store:
                 )
             except OSError:
                 ref_text = ""
-            match = re.search(r"ctx_[0-9a-f]{8,16}", ref_text)
-            if match:
-                return match.group(0)
+            value = ref_text.strip()
+            if CTX_ID_RE.match(value):
+                return value
             # The cached context line makes HEAD understandable to older tools,
             # but a present symbolic ref is authoritative even when unborn.
             return None
@@ -196,8 +196,8 @@ class Store:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except (OSError, StoreError):
                 continue
-            match = re.search(r"ctx_[0-9a-f]{8,16}", text)
-            ctx_id = match.group(0) if match else None
+            value = text.strip()
+            ctx_id = value if CTX_ID_RE.match(value) else None
             if ctx_id is None or self.load_context(ctx_id) is not None:
                 result[name] = ctx_id
         return dict(sorted(result.items()))
@@ -211,6 +211,13 @@ class Store:
         path = self._ref_path(name)
         if path.exists():
             raise StoreError("context branch already exists: {}".format(name))
+        parent = path.parent
+        while parent != self.refs_dir:
+            if parent.exists() and not parent.is_dir():
+                raise StoreError(
+                    "context branch conflicts with existing ref path: {}".format(name)
+                )
+            parent = parent.parent
         target = start_id or self.head()
         if target and self.load_context(target) is None:
             raise StoreError("unknown context: {}".format(target))

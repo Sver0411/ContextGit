@@ -54,26 +54,66 @@ be re-checked mechanically. The drift engine uses exactly this split.
 
 ## 4. History model
 
-Contexts form a chain via `parent_context_id`:
+Contexts form a directed acyclic graph. `parent_context_id` remains the
+first-parent compatibility pointer; V3 writers also emit
+`parent_context_ids`:
 
 ```
 ctx_a1 (root)
   └── ctx_b2   "Auth middleware implemented"
-        └── ctx_c3   "Refresh token rotation done"
+        ├── ctx_c3   "Refresh token rotation done" ──┐  (main)
+        └── ctx_d4   "Explore passkeys" ─────────────┴─ ctx_e5 (merge)
 ```
 
-* **v1 is linear.** A context has exactly one parent. Branch/merge is
-  reserved for future versions; because history is already a DAG-shaped
-  pointer structure, adding branches later requires **no schema change**.
+* Root contexts have no parents, ordinary contexts have one, and V3 merge
+  contexts have exactly two ordered parents: `[ours, theirs]`.
+  `parent_context_id` MUST equal the first parent so V1/V2 readers retain a
+  valid linear first-parent view.
 * Contexts are **immutable**. Correction = create a new context whose
   parent is the same as the wrong one's (or record an explicit decision).
 * `context_id` is `ctx_` + 8 hex chars of
-  `sha256(parent_id ‖ created_at ‖ repo_HEAD ‖ canonical_core_payload)`.
+  `sha256(parent_ids ‖ created_at ‖ repo_HEAD ‖ canonical_core_payload)`.
   The timestamp guarantees uniqueness; the payload hash makes ids
   self-verifying (recompute and compare).
 * The **context HEAD** is a pointer to the newest context in the chain
   (reference impl: `.context-git/HEAD`). `checkout` moves only this
   pointer — it MUST never touch the user's git repository or files.
+
+### 4.1 Context branches
+
+A context branch is a validated name pointing to one Context Object. In the
+reference store, refs live below `.context-git/refs/heads/` and `HEAD` is
+either symbolic (`ref: refs/heads/main`) or detached (`context: ctx_…`).
+
+Branch operations MUST NOT read or mutate source Git refs, the Git index, or
+working-tree files. Deleting a branch removes only the ref; Context Objects
+remain immutable and may still be reachable through merge ancestry.
+
+V1/V2 stores with a direct context HEAD migrate losslessly to a `main`
+context branch. Checking out a raw context id is detached inspection; a new
+branch is required before an ordinary commit.
+
+### 4.2 Three-way semantic merge
+
+Given current `ours`, selected `theirs`, and their nearest common ancestor
+`base`, a conforming V3 merge:
+
+1. fast-forwards when `ours` is an ancestor of `theirs`, unless explicitly
+   asked to record a merge object;
+2. treats a side unchanged from `base` as accepting the other side;
+3. unions independent additions to list fields and honours one-sided
+   removals;
+4. merges each progress task by semantic identity and state;
+5. reports a conflict when both sides changed the same semantic value
+   differently;
+6. persists nothing until every conflict has an explicit
+   `ours` / `theirs` / `base` resolution;
+7. captures Git state, important-file fingerprints, environment and
+   validation freshness again instead of merging stale observations; and
+8. writes `[ours, theirs]` plus merge provenance into the new immutable
+   context.
+
+Unrelated roots MUST be refused by default. Merge previews MUST be read-only.
 
 ## 5. Incremental commits
 
@@ -179,16 +219,18 @@ Full threat model and guarantees: `security.md`.
   any `1.x` they understand and warn on higher majors.
 * `schema_version` may advance independently (additive fields).
 * Unknown fields MUST be ignored, not rejected — forward compatibility.
-* The `extensions` slot (arbitrary JSON object) is reserved for future
-  capability blocks (encryption, signatures, remote references, branching
-  metadata). v1 writers MUST leave it empty.
+* V3 branch/merge is an additive UACP/1.0 capability: legacy readers follow
+  `parent_context_id`; V3 readers prefer `parent_context_ids` when present.
+* The `extensions` slot (arbitrary JSON object) remains reserved for future
+  capability blocks such as encryption, signatures, and remote references.
 
 ## 12. Conformance
 
 A tool is UACP/1.0-conformant if it can, at minimum:
 
 1. produce a Context Object valid against the JSON Schema,
-2. link contexts via `parent_context_id` and maintain a HEAD pointer,
+2. link contexts via `parent_context_id` and maintain a HEAD pointer (V3
+   implementations additionally understand `parent_context_ids` and refs),
 3. refuse to store P3 content and redact secrets pre-write,
 4. compute a semantic diff between two of its own contexts,
 5. report graded drift with per-file validity against a live repository.

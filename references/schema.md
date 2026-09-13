@@ -9,9 +9,11 @@ This document explains intent, defaults and prohibited content per field.
 |---|---|---|
 | `protocol` | const `"UACP"` | discriminator |
 | `protocol_version` | `"1.0"` | semantics version; readers accept any 1.x |
-| `schema_version` | `"1.0"` | field-level version; advances additively |
-| `context_id` | `ctx_<8hex>` | sha256(parent, timestamp, HEAD, core payload) |
-| `parent_context_id` | id \| null | null = root context |
+| `schema_version` | `"1.1"` | V3 additive fields; older `1.0` objects remain valid |
+| `context_id` | `ctx_<8hex>` | sha256(parent ids, timestamp, HEAD, core payload) |
+| `parent_context_id` | id \| null | first parent; null = root context |
+| `parent_context_ids` | id[] | V3 DAG lineage: 0 root, 1 ordinary, 2 merge |
+| `context_branch` | string \| null | branch at object creation; refs are authoritative |
 | `created_at` | ISO-8601 UTC | always ends in `Z` |
 | `message` | string \| null | commit summary; never treated as evidence |
 
@@ -73,7 +75,9 @@ inherited value (agents deliberately say "no more pending work").
 * `metadata` — tool name/version, free notes, `fingerprints` map
   (drift baseline), `fingerprint_algorithm`, and optional `session_import`
   provenance. Session provenance contains no source path or transcript and
-  records that raw messages, tools and reasoning were not stored.
+  records that raw messages, tools and reasoning were not stored. V3 `merge`
+  provenance records the merge base, source context/ref, strategy, and only
+  the keys of explicitly resolved conflicts.
 * `extensions` — reserved empty object for future capability blocks.
 
 ## Prohibited content (P3 — rejects or redacts on write)

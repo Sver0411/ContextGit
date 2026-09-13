@@ -1,6 +1,6 @@
 ---
 name: context-git
-description: Git for AI Agent Context — version, diff, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save progress, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
+description: Git for AI Agent Context — version, branch, semantically merge, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save progress, compare or merge parallel agent work, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
 ---
 
 # Context Git
@@ -29,6 +29,7 @@ Resume (adopt existing context):
 
 Inspect:
 - "context diff" / "what changed since last snapshot" / "context log" / "drift"
+- "context branch" / "并行方案" / "merge agent context" / "合并上下文"
 
 ## Export workflow (snapshot / commit)
 
@@ -96,14 +97,42 @@ to import a session:
 Use `capabilities --json` when the user needs the V2 observed/declaration
 profile. A `declared` capability is not the same as an observed one.
 
+## V3 branch / merge workflow
+
+Context branches are independent from source Git branches. `switch`,
+`checkout`, and `merge` must never modify repository files, the Git index, or
+Git refs.
+
+1. Create an experimental line with `switch -c NAME` (or `branch NAME`, then
+   `switch NAME`). Commit normal incremental contexts on that branch.
+2. Return to the receiving branch with `switch main` and preview using
+   `merge SOURCE --dry-run`.
+3. A fast-forward is safe when the receiving tip is an ancestor. A divergent
+   merge uses the nearest common Context ancestor and combines semantic fields.
+4. Never guess through a conflict. The command exits 4 and prints stable field
+   keys. Ask the user when the correct outcome is not already explicit; then
+   repeat with `--resolve KEY=ours|theirs|base`. Use `--resolve-all` only when
+   the user has clearly chosen one side as authoritative.
+5. Verify the resulting two-parent context with `show` and `log --all`, then
+   run `verify`. Observed project/Git/file evidence is freshly captured at the
+   merge; it is not copied from either branch.
+
+`checkout <context-id>` deliberately detaches context HEAD. Create a branch
+with `switch -c NAME` before committing. Deleting a context branch deletes only
+its ref; immutable context objects remain in `contexts/`.
+
 ## Drift / status / diff / log
 
 - `status` — is the current context still fresh? (run before resuming work)
 - `diff [old] [new]` — semantic diff; 0 args = HEAD vs parent, 1 arg = that
   context vs its parent
 - `log` — context history with summaries
+- `log --all` — all stored contexts with branch decorations and merge parents
 - `show [id]` / `checkout <id|->` — inspect or move the context HEAD
   (checkout never touches the user's git repo)
+- `branch [NAME] [START]` / `branch -d NAME` — list, create, or delete refs
+- `switch NAME` / `switch -c NAME [--start REV]` — change context branch
+- `merge SOURCE [--dry-run]` — fast-forward or three-way semantic merge
 
 ## Security rules (hard)
 

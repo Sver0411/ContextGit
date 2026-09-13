@@ -7,7 +7,7 @@
 Most handoff tools generate a document.<br>
 Context Git versions the working state itself.
 
-Snapshot · Diff · Detect drift · Import sessions · Resume anywhere.
+Snapshot · Branch · Semantic merge · Detect drift · Resume anywhere.
 
 ```
 Codex
@@ -43,6 +43,8 @@ Context Git treats agent context like source code:
 | diff | **Semantic Context Diff** — progress moved, decisions made, issues resolved — not JSON field noise |
 | log | **Context Log** — the chain of working states |
 | checkout | **Context Checkout** — inspect any past state (never touches your git repo) |
+| branch | **Context Branch** — explore competing plans without overwriting working state |
+| merge | **Semantic Merge** — reconcile outcomes, progress and constraints with a common ancestor |
 | status | **Drift Detection** — is the context still true against the live repo? |
 
 And it is honest about evidence: machine-observed facts (`git HEAD`,
@@ -89,6 +91,8 @@ context-git diff                  # semantic diff: HEAD vs parent
 context-git log                   # the context chain
 context-git resume                # the agent-ready briefing (drift + capabilities + next step)
 context-git checkout ctx_001      # move context HEAD back in time (git repo untouched)
+context-git switch -c experiment  # branch the working context, not the Git repository
+context-git merge experiment      # fast-forward or three-way semantic merge
 context-git verify                # residual secret scan over the store
 context-git capabilities          # probe capabilities available in this environment
 
@@ -104,6 +108,44 @@ Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
 uses `validation.test=pass` form). Fields you don't restate are inherited
 from the parent context — commits are incremental, like good commit
 messages, not like re-writing the whole README.
+
+## V3 — context branch and semantic merge
+
+Context branches let multiple agents or experiments evolve from the same
+working state without overwriting each other. They are lightweight files in
+`.context-git/refs/heads/`; they are completely separate from Git branches:
+
+```bash
+context-git branch                       # list context branches
+context-git switch -c auth-passkeys       # create from context HEAD and switch
+context-git commit --no-prompt \
+  --set completed="Passkey design" \
+  --set decisions='[{"decision":"Use WebAuthn","reason":"phishing resistant"}]'
+context-git switch main
+context-git merge auth-passkeys --dry-run # preview; writes nothing
+context-git merge auth-passkeys           # merge when conflict-free
+context-git log --all                     # all branch tips and merge parents
+```
+
+Merging is a local, deterministic three-way operation:
+
+1. Find the nearest common Context ancestor.
+2. Automatically combine one-sided changes and independent list additions.
+3. Detect incompatible changes to the same goal, objective, task state,
+   architecture fact, decision, constraint, issue, or next action.
+4. Refuse to write unresolved conflicts. Resolve deliberately with
+   `--resolve KEY=ours|theirs|base` (repeatable) or `--resolve-all`.
+5. Capture current machine evidence again and save an immutable merge context
+   with two parents: `[ours, theirs]`.
+
+If the current tip is an ancestor of the source, merge fast-forwards by
+default; `--no-ff` records a two-parent merge context. Unrelated roots are
+refused unless `--allow-unrelated` is explicit. `checkout <context-id>` is a
+detached inspection state; use `switch -c NAME` before committing from it.
+
+Observed fields such as Git state, important-file fingerprints, environment,
+and validation freshness are never blended from stale contexts. The merge
+captures them again from the live project.
 
 ## V2 — private session import
 
@@ -204,6 +246,8 @@ Recommended Next Step:
 ```
 
 More real output in [`examples/`](examples/).
+The complete V3 branch/conflict/merge run is in
+[`examples/branch-merge.example.txt`](examples/branch-merge.example.txt).
 
 ## Protocol
 
@@ -215,6 +259,7 @@ Context Objects speak **UACP/1.0** (Universal Agent Context Protocol):
 - [`references/schema.md`](references/schema.md) — field-by-field reference
 - [`references/security.md`](references/security.md) — threat model and guarantees
 - [`references/adapters.md`](references/adapters.md) — V2 session formats and discovery boundaries
+- [`references/branching.md`](references/branching.md) — V3 refs, merge rules and conflict handling
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release changes
 
 Any tool that reads JSON can consume a context; the `protocol: "UACP"`
@@ -247,8 +292,9 @@ context-git/
 ├── context_git/            # the package
 │   ├── cli.py              # argparse CLI
 │   ├── context.py          # Context Object builder + context ids
-│   ├── storage.py          # .context-git/ store (HEAD, contexts/)
+│   ├── storage.py          # .context-git/ store (HEAD, refs/heads, contexts/)
 │   ├── diff.py             # semantic diff engine
+│   ├── merge.py            # deterministic three-way context merge
 │   ├── drift.py            # drift detection + validity + freshness
 │   ├── gitstate.py         # read-only git snapshots
 │   ├── project.py          # stack detection (evidence or "unknown")
@@ -259,7 +305,7 @@ context-git/
 │   ├── common.py           # ignore rules, fingerprints, safe IO
 │   └── adapters/           # codex / claude-code / opencode / cursor / gemini / generic
 ├── schemas/uacp-1.0.schema.json
-├── references/             # protocol.md, schema.md, security.md
+├── references/             # protocol, schema, security, adapters, branching
 ├── examples/               # real generated artifacts
 └── tests/                  # stdlib unittest suite
 ```
@@ -278,9 +324,13 @@ context-git/
 Store location is a plain directory: sync it, commit it, or copy it —
 no server, no lock-in.
 
-## Known limitations (v2)
+## Known limitations (v3)
 
-- Linear history only (branch/merge is schema-ready but not implemented).
+- Merge is deterministic and structural rather than LLM-assisted. Two
+  differently worded bullets may require an explicit resolution even when a
+  human considers them equivalent.
+- Context refs are local files; concurrent processes do not yet have a
+  lock/transaction protocol. Avoid writing the same store simultaneously.
 - Semantic diff is structural — deterministic, LLM-free; it matches reworded
   items by normalisation, not by meaning.
 - Drift reads the working tree of one machine; contexts are not remotely
@@ -298,8 +348,8 @@ no server, no lock-in.
 ## Roadmap
 
 - **v1 — Context Versioning** ✓
-- **v2 — richer adapters** (private session ingestion, capability auto-profiling) ← you are here
-- **v3 — context branch / merge** (experimental lines of work)
+- **v2 — richer adapters** ✓
+- **v3 — context branch / merge** ✓ ← you are here
 - **v4 — remote contexts** (push/pull a context chain)
 - **v5 — agent-to-agent context network**
 

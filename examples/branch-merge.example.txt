@@ -1,0 +1,91 @@
+$ context-git snapshot --no-prompt -q -m "Shared starting point" \
+    --set "goal=Ship authentication" \
+    --set "current_objective=Choose authentication approach" \
+    --set "pending=Implement authentication"
+ctx_a352cc92
+
+$ context-git switch -c passkeys
+switched context branch to passkeys at ctx_a352cc92
+source Git branch and working tree were not touched
+
+$ context-git commit --no-prompt -q -m "Passkey plan" \
+    --set "current_objective=Implement WebAuthn" \
+    --set "completed=Passkey design" \
+    --set "constraints=Phishing-resistant login"
+ctx_5ed19ab1
+
+$ context-git switch main
+switched context branch to main at ctx_a352cc92
+source Git branch and working tree were not touched
+
+$ context-git commit --no-prompt -q -m "Session plan" \
+    --set "current_objective=Implement cookie sessions" \
+    --set "completed=Session design" \
+    --set "constraints=HTTP-only cookies"
+ctx_345ae551
+
+$ context-git merge passkeys --dry-run
+Context Merge
+  ours:   ctx_345ae551
+  theirs: ctx_5ed19ab1 (passkeys)
+  base:   ctx_a352cc92
+  conflicts: 1
+    - current_objective
+Resolve explicitly with `--resolve KEY=ours|theirs|base`.
+
+$ context-git merge passkeys --resolve current_objective=ours
+merged passkeys into main as ctx_7ec8c32a
+parents: ctx_345ae551, ctx_5ed19ab1 · base: ctx_a352cc92
+
+$ context-git branch
+* main                     ctx_7ec8c32a
+  passkeys                 ctx_5ed19ab1
+
+$ context-git log --all
+ctx_7ec8c32a (main)  2026-09-13T04:58:42  Merge context passkeys into main
+              merge parents ctx_345ae551, ctx_5ed19ab1
+              completed 2 · in-progress 0 · pending 1
+ctx_345ae551  2026-09-13T04:58:41  Session plan
+              completed 1 · in-progress 0 · pending 1
+ctx_5ed19ab1 (passkeys)  2026-09-13T04:58:41  Passkey plan
+              completed 1 · in-progress 0 · pending 1
+ctx_a352cc92  2026-09-13T04:58:41  Shared starting point
+              completed 0 · in-progress 0 · pending 1
+
+The merge Context Object contains:
+
+{
+  "protocol": "UACP",
+  "protocol_version": "1.0",
+  "schema_version": "1.1",
+  "context_id": "ctx_7ec8c32a",
+  "parent_context_id": "ctx_345ae551",
+  "parent_context_ids": ["ctx_345ae551", "ctx_5ed19ab1"],
+  "context_branch": "main",
+  "progress": {
+    "completed": [
+      {"text": "Session design", "source_type": "agent"},
+      {"text": "Passkey design", "source_type": "agent"}
+    ],
+    "in_progress": [],
+    "pending": [
+      {"text": "Implement authentication", "source_type": "agent"}
+    ]
+  },
+  "constraints": [
+    {"text": "HTTP-only cookies", "source_type": "agent"},
+    {"text": "Phishing-resistant login", "source_type": "agent"}
+  ],
+  "metadata": {
+    "merge": {
+      "base_context_id": "ctx_a352cc92",
+      "source_context_id": "ctx_5ed19ab1",
+      "source_ref": "passkeys",
+      "strategy": "three-way",
+      "resolved_conflicts": ["current_objective"]
+    }
+  }
+}
+
+This transcript was produced by the CLI in a new temporary Git repository.
+Context ids and timestamps naturally differ on every run.

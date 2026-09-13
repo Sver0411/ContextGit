@@ -79,6 +79,19 @@ goal/objective values and structured outcome headings/checklists. It stores
 no raw message, original source path, transcript, or session identifier. A
 source file inside the repository is excluded from `important_files`.
 
+## V3 branch and merge boundary
+
+- Context refs live only below `.context-git/refs/heads/`. Branch names use a
+  conservative cross-platform character set and reject absolute paths,
+  traversal components, repeated separators, `.lock` suffixes and symlinks.
+- Context `switch`, `checkout`, and `merge` do not call Git mutation commands
+  and never update source Git refs, the index, or working-tree files.
+- Merge operates only on already-redacted Context Objects. The merged object
+  passes the independent residual secret scan before any ref advances.
+- Unresolved semantic conflicts are preview-only and are never persisted.
+- Merge provenance contains context ids, a validated local ref name and
+  resolution keys, never discarded branch contents or private transcripts.
+
 ## Guarantees
 
 1. Sensitive paths are never opened — not for hashing, not for listing.
