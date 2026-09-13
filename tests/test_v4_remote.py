@@ -127,6 +127,7 @@ class TestRemoteProtocol(TempRepoTest):
         self.assertEqual(https, "repo://github.com/acme/demo")
         self.assertEqual(https, ssh)
         self.assertEqual(https, explicit)
+        self.assertTrue(_normalise_repository_url(r"C:\work\demo").startswith("file:"))
 
     def test_manifest_rejects_invalid_protocol_and_dangling_ref(self):
         manifest = empty_manifest({"name": "demo", "repository_fingerprint": None})

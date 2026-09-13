@@ -105,6 +105,11 @@ def _normalise_repository_url(value):
     value = str(value or "").strip()
     if not value:
         return None
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        try:
+            return "file:" + str(Path(value).resolve())
+        except OSError:
+            return "file:" + value
     if "://" in value:
         parts = parse.urlsplit(value)
         scheme = parts.scheme.lower()
@@ -237,7 +242,10 @@ def normalise_remote_url(value, project_root, allow_insecure_http=False):
     value = str(value or "").strip()
     if not value:
         raise RemoteError("remote URL/path cannot be empty")
-    parts = parse.urlsplit(value)
+    # urllib treats a Windows drive letter as a URL scheme (``C:``). Resolve
+    # that ambiguity before applying the remote scheme policy.
+    windows_drive_path = bool(re.match(r"^[A-Za-z]:[\\/]", value))
+    parts = parse.urlsplit("") if windows_drive_path else parse.urlsplit(value)
     if parts.scheme in ("https", "http"):
         if parts.username or parts.password:
             raise RemoteError("credentials must not be embedded in a remote URL")
