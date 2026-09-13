@@ -264,7 +264,7 @@ def normalise_remote_url(value, project_root, allow_insecure_http=False):
         raise RemoteError("unsupported remote scheme: {}".format(parts.scheme))
     if parts.scheme == "file" and parts.netloc not in ("", "localhost"):
         raise RemoteError("file remotes must not name a network host")
-    raw_path = parse.unquote(parts.path) if parts.scheme == "file" else value
+    raw_path = request.url2pathname(parts.path) if parts.scheme == "file" else value
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
         path = Path(project_root) / path
