@@ -115,6 +115,27 @@ source file inside the repository is excluded from `important_files`.
   expose an ETag and honor `If-Match`/`If-None-Match`; `409`/`412` means retry
   after fetching. Push is non-fast-forward by default.
 
+## V5 Agent Context Network boundary
+
+- The network publishes Agent profiles, Context pointers, compact handoff
+  messages, capability compatibility and status receipts only. It never
+  transports source files, diffs, transcripts, prompts, reasoning, tool
+  payloads, environment values, or credentials.
+- Handoffs and receipts are immutable and content-addressed. The mutable
+  network manifest records their full SHA-256 and canonical byte size; the
+  entire advertised set is checked before new objects enter the local cache.
+- A handoff must reference a Context already present in the verified V4 remote
+  manifest. Inbox/status sync authenticates that Context graph first.
+- Receipt publishers and state history are checked against the handoff:
+  recipient-only, at most one `accepted`, and no receipt after `completed` or
+  `rejected`. Expired handoffs remain auditable but cannot be accepted.
+- Agent ids are names within one remote. They have no per-Agent signature or
+  key in V5, so authenticity depends on TLS, bearer scope and server-side
+  authorization. `register --force` is an explicit takeover, not proof of
+  identity. Replacing/removing a remote clears its bound local identity.
+- Accepting creates or selects only a `.context-git/refs/heads/handoff/...`
+  branch. It never changes source Git state or repository files.
+
 ## Guarantees
 
 1. Sensitive paths are never opened — not for hashing, not for listing.
@@ -126,6 +147,8 @@ source file inside the repository is excluded from `important_files`.
    never written to the context store.
 6. Remote sync never stores a configured bearer-token value and never follows
    a response redirect with it.
+7. Network messages and profiles pass the same redaction and residual-secret
+   checks before publication or caching.
 
 ## Known limits (honesty section)
 
@@ -143,6 +166,6 @@ source file inside the repository is excluded from `important_files`.
 * Third-party private session formats are not stable APIs. Preview every
   import with `--dry-run` after a tool upgrade and correct heuristic
   extraction with `--set`.
-* Transport integrity is not publisher authenticity. V4 does not sign or
-  encrypt Context Objects; use TLS, authenticated endpoints, access controls,
-  and encrypted storage where the deployment requires them.
+* Transport integrity is not publisher authenticity. V4/V5 do not sign or
+  encrypt Context, handoff, or receipt objects; use TLS, authenticated
+  endpoints, access controls, and encrypted storage where required.

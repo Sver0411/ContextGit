@@ -1,6 +1,6 @@
 # UACP — Universal Agent Context Protocol
 
-Version 1.0 · status: stable (implemented by Context Git 1.x–4.x)
+Version 1.0 · status: stable (implemented by Context Git 1.x–5.x)
 
 UACP defines what an AI agent's *working state* looks like when written
 down, how those snapshots form a history, how two snapshots are compared,
@@ -136,6 +136,27 @@ A conforming remote implementation:
 The reference manifest/HTTPS contract is specified in `remote.md` and
 `schemas/uacp-remote-1.0.schema.json`. Unknown manifest fields SHOULD be
 ignored for forward compatibility.
+
+### 4.4 Agent Context Network
+
+V5 implementations MAY add an asynchronous, directed handoff layer over a V4
+Context remote. This layer does not change the Context Object schema. A
+conforming Agent Context Network implementation:
+
+1. registers bounded Agent ids with capability profiles;
+2. points each handoff to an already-published, verified Context Object;
+3. addresses each handoff to exactly one different recipient;
+4. stores handoffs and receipts as immutable, content-addressed objects;
+5. allows only the named recipient to publish accepted, completed, or rejected
+   receipts, and rejects transitions after a terminal receipt;
+6. verifies the complete advertised network object set before caching it;
+7. imports an accepted handoff as a Context branch without mutating source Git
+   or repository files; and
+8. transfers no transcript, source file, tool payload, prompt, or credential.
+
+Agent ids are transport-authenticated names, not cryptographic principals.
+The normative wire formats and lifecycle are specified in `network.md` and
+the three `schemas/uacp-{network,handoff,receipt}-1.0.schema.json` files.
 
 ## 5. Incremental commits
 

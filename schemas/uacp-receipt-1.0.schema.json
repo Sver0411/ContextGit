@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Sver0411/ContextGit/schemas/uacp-receipt-1.0.schema.json",
+  "title": "UACP Context Handoff Receipt 1.0",
+  "type": "object",
+  "required": ["format", "version", "protocol", "receipt_id", "handoff_id", "by_agent", "status", "created_at", "message"],
+  "properties": {
+    "format": {"const": "context-git-receipt"},
+    "version": {"const": "1.0"},
+    "protocol": {"const": "UACP/1.0"},
+    "receipt_id": {"type": "string", "pattern": "^rcp_[0-9a-f]{16}$"},
+    "handoff_id": {"type": "string", "pattern": "^hnd_[0-9a-f]{16}$"},
+    "by_agent": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{1,63}$"},
+    "status": {"enum": ["accepted", "completed", "rejected"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "message": {"oneOf": [{"type": "null"}, {"type": "string", "maxLength": 2000}]}
+  },
+  "additionalProperties": true
+}

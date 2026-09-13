@@ -7,7 +7,7 @@
 Most handoff tools generate a document.<br>
 Context Git versions the working state itself.
 
-Snapshot · Branch · Semantic merge · Secure sync · Detect drift · Resume anywhere.
+Snapshot · Branch · Semantic merge · Secure sync · Directed handoff · Resume anywhere.
 
 ```
 Codex
@@ -46,6 +46,7 @@ Context Git treats agent context like source code:
 | branch | **Context Branch** — explore competing plans without overwriting working state |
 | merge | **Semantic Merge** — reconcile outcomes, progress and constraints with a common ancestor |
 | remote | **Remote Context** — securely push/fetch immutable context history across machines |
+| handoff | **Agent Context Handoff** — send one published Context to one registered Agent |
 | status | **Drift Detection** — is the context still true against the live repo? |
 
 And it is honest about evidence: machine-observed facts (`git HEAD`,
@@ -97,6 +98,9 @@ context-git merge experiment      # fast-forward or three-way semantic merge
 context-git remote add origin /path/outside/project/context-remote
 context-git push                  # publish the current Context branch
 context-git pull                  # fetch + fast-forward; never touches source Git
+context-git network register alice --agent codex
+context-git network send bob -m "Review the auth boundary"
+context-git network inbox         # verified handoffs addressed to this Agent
 context-git verify                # residual secret scan over the store
 context-git capabilities          # probe capabilities available in this environment
 
@@ -112,6 +116,50 @@ Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
 uses `validation.test=pass` form). Fields you don't restate are inherited
 from the parent context — commits are incremental, like good commit
 messages, not like re-writing the whole README.
+
+## V5 — Agent Context Network
+
+V5 turns a V4 Context remote into a small, asynchronous Agent Context Network.
+Agents advertise a stable id and capability profile; a sender addresses an
+immutable handoff to one recipient, and that recipient can accept it as a
+local Context branch and publish immutable status receipts:
+
+```bash
+# Alice publishes a Context and registers on its V4 remote.
+context-git push origin main
+context-git network register alice --name "Alice" --agent codex
+
+# Bob configures/pulls the same remote, then registers from his checkout.
+context-git network register bob --name "Bob" --agent claude-code
+
+# Alice can now address the published Context to Bob.
+context-git network agents
+context-git network send bob -m "Review the auth boundary" --expires-hours 24
+
+# In Bob's checkout:
+context-git network inbox
+context-git network accept hnd_0123456789abcdef --switch
+context-git network reply hnd_0123456789abcdef accepted -m "Review started"
+context-git network reply hnd_0123456789abcdef completed -m "Review finished"
+
+# Back in Alice's checkout:
+context-git network status hnd_0123456789abcdef
+```
+
+A handoff contains a Context id/branch, sender, recipient, compact intent,
+expiry, required capabilities, and the recipient compatibility result. It does
+not contain source files, raw chats, prompts, tool payloads, or credentials.
+Inbox/status sync verifies the V4 Context graph first, then verifies every
+advertised handoff and receipt by content id plus full SHA-256 and byte size
+before caching anything.
+
+Agent ids are names inside one authenticated remote, not cryptographic
+identities. An existing id cannot be claimed accidentally; `register --force`
+is the explicit administrative takeover path. Use TLS, scoped credentials and
+server-side authorization when publisher authenticity matters.
+
+See [`references/network.md`](references/network.md) for lifecycle rules,
+wire objects, HTTP endpoints, concurrency and the trust model.
 
 ## V4 — Remote Context
 
@@ -297,6 +345,8 @@ The complete V3 branch/conflict/merge run is in
 [`examples/branch-merge.example.txt`](examples/branch-merge.example.txt).
 The V4 two-machine/divergence flow is in
 [`examples/remote-sync.example.txt`](examples/remote-sync.example.txt).
+The V5 directed handoff/receipt flow is in
+[`examples/network-handoff.example.txt`](examples/network-handoff.example.txt).
 
 ## Protocol
 
@@ -311,6 +361,10 @@ Context Objects speak **UACP/1.0** (Universal Agent Context Protocol):
 - [`references/branching.md`](references/branching.md) — V3 refs, merge rules and conflict handling
 - [`references/remote.md`](references/remote.md) — V4 transports, refs, integrity and HTTP contract
 - [`schemas/uacp-remote-1.0.schema.json`](schemas/uacp-remote-1.0.schema.json) — remote manifest schema
+- [`references/network.md`](references/network.md) — V5 identities, handoffs, receipts and endpoints
+- [`schemas/uacp-network-1.0.schema.json`](schemas/uacp-network-1.0.schema.json) — network manifest schema
+- [`schemas/uacp-handoff-1.0.schema.json`](schemas/uacp-handoff-1.0.schema.json) — handoff schema
+- [`schemas/uacp-receipt-1.0.schema.json`](schemas/uacp-receipt-1.0.schema.json) — receipt schema
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release changes
 
 Any tool that reads JSON can consume a context; the `protocol: "UACP"`
@@ -347,6 +401,7 @@ context-git/
 │   ├── diff.py             # semantic diff engine
 │   ├── merge.py            # deterministic three-way context merge
 │   ├── remote.py           # file/HTTPS transport + verified push/fetch/pull
+│   ├── network.py          # Agent profiles, directed handoffs + receipts
 │   ├── drift.py            # drift detection + validity + freshness
 │   ├── gitstate.py         # read-only git snapshots
 │   ├── project.py          # stack detection (evidence or "unknown")
@@ -373,10 +428,11 @@ context-git/
 | Gemini CLI | source & target | project-hash-scoped session import |
 | Any agent | both | contexts are plain JSON + Markdown; `generic` adapter is the floor |
 
-The local store remains a plain directory. V4 adds an interoperable file/HTTPS
-remote format without requiring a hosted service or coupling to source Git.
+The local store remains a plain directory. V5 adds an interoperable Agent
+Context Network on the V4 file/HTTPS remote without requiring a hosted service
+or coupling to source Git.
 
-## Known limitations (v4)
+## Known limitations (v5)
 
 - Merge is deterministic and structural rather than LLM-assisted. Two
   differently worded bullets may require an explicit resolution even when a
@@ -388,9 +444,12 @@ remote format without requiring a hosted service or coupling to source Git.
   items by normalisation, not by meaning.
 - Drift always describes the current machine. After pulling a portable
   Context, run `status`/`resume` to re-evaluate its observations locally.
-- V4 has no remote deletion, pruning, encryption-at-rest, signatures, or
-  partial object negotiation. Fetch validates the complete advertised
-  manifest (up to 10,000 objects) before moving tracking refs.
+- Remote/network storage has no deletion, pruning, encryption-at-rest,
+  signatures, or partial object negotiation. Fetch validates the complete
+  advertised manifest (up to 10,000 objects) before moving tracking refs.
+- Agent ids are authenticated only by the remote transport and its access
+  control. V5 does not provide per-Agent keys, signatures, discovery across
+  remotes, live messaging, task scheduling, or automatic work execution.
 - Agent detection uses environment markers and can fall back to `generic`.
 - Session extraction is deterministic and LLM-free. Unstructured conversation
   becomes only goal/current objective; structured headings and checklists
@@ -406,8 +465,8 @@ remote format without requiring a hosted service or coupling to source Git.
 - **v1 — Context Versioning** ✓
 - **v2 — richer adapters** ✓
 - **v3 — context branch / merge** ✓
-- **v4 — remote contexts** ✓ ← you are here
-- **v5 — agent-to-agent context network**
+- **v4 — remote contexts** ✓
+- **v5 — agent-to-agent context network** ✓ ← you are here
 
 ## Development
 

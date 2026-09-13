@@ -1,6 +1,6 @@
 ---
 name: context-git
-description: Git for AI Agent Context — version, branch, semantically merge, securely sync, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save or sync progress, compare or merge parallel agent work, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
+description: Git for AI Agent Context — version, branch, semantically merge, securely sync, send directed Agent handoffs, drift-check, explicitly import private sessions, and resume an agent's working state (UACP/1.0). Use when the user asks to save or sync progress, compare or merge parallel agent work, import a local agent session, hand off to another agent, resume/接手 a project, or inspect what changed between work sessions. Captures compressed working state (not chat history) into .context-git/, detects drift against the live repository, and produces agent-ready resume briefings.
 ---
 
 # Context Git
@@ -31,6 +31,7 @@ Inspect:
 - "context diff" / "what changed since last snapshot" / "context log" / "drift"
 - "context branch" / "并行方案" / "merge agent context" / "合并上下文"
 - "push/pull context" / "同步上下文" / "remote context" / "跨机器接手"
+- "send context to agent" / "Agent inbox" / "把上下文发给另一个 Agent"
 
 ## Export workflow (snapshot / commit)
 
@@ -153,6 +154,33 @@ explicit localhost test service. `--allow-other-project` is likewise an
 explicit override, not a recovery default. Remote failures exit 5 and should
 be resolved without hand-editing manifests, objects, or refs.
 
+## V5 Agent Context Network workflow
+
+The network is asynchronous coordination over a configured V4 Context remote;
+it does not launch agents or send chat messages.
+
+1. Publish the Context branch with `push`, then register the local identity:
+   `network register AGENT_ID --agent NAME`. Treat `--force` as an intentional
+   administrative takeover and use it only when the user explicitly chooses
+   that outcome.
+2. Inspect `network agents` before sending. `network send RECIPIENT` publishes
+   the current branch tip, compact intent and recipient compatibility. Never
+   put prompts, transcripts, credentials, source content or tool output in
+   `--message`.
+3. A recipient runs `network inbox`; this first fetches and verifies the V4
+   Context graph, then the complete network object set. Run
+   `network accept ID --switch` to create a local `handoff/SENDER/...` Context
+   branch.
+4. Publish progress with `network reply ID accepted|completed|rejected`.
+   `completed` and `rejected` are terminal. The sender inspects immutable
+   receipts with `network status [ID]`.
+5. After acceptance, run `status` or `resume` on the handoff branch and obey
+   normal drift/freshness rules before changing project code.
+
+Agent ids are not cryptographic identities. Trust derives from the configured
+remote's TLS, bearer scope and access control. Network protocol failures exit
+6; do not hand-edit manifests, handoffs, receipts or the local cache.
+
 ## Drift / status / diff / log
 
 - `status` — is the current context still fresh? (run before resuming work)
@@ -169,6 +197,7 @@ be resolved without hand-editing manifests, objects, or refs.
 - `push [REMOTE] [BRANCH]` — publish an immutable Context DAG and branch tip
 - `fetch [REMOTE]` — verify objects and refresh remote-tracking refs
 - `pull [REMOTE] [BRANCH]` — fetch and fast-forward only
+- `network register|agents|send|inbox|accept|reply|status` — directed Agent handoffs
 
 ## Security rules (hard)
 
@@ -181,8 +210,9 @@ be resolved without hand-editing manifests, objects, or refs.
 - The tool writes only inside `.context-git/`. If you find yourself editing
   project files "for the handoff", stop — that is a violation.
 - Remote sync is the only exception to local-only writes: when explicitly
-  requested, it may write the configured Context remote. It must never mutate
-  source Git state or upload project/session content.
+  requested, it and V5 network commands may write the configured Context
+  remote. They must never mutate source Git state or upload project/session
+  content.
 
 ## Failure handling
 
@@ -197,6 +227,8 @@ be resolved without hand-editing manifests, objects, or refs.
   force unless the user explicitly chose ref replacement.
 - Remote credential missing → ask the user to supply the configured
   environment variable outside Context Git; never request or store its value.
+- Network id already registered → do not take it over silently; use another id
+  or obtain explicit user direction before `network register --force`.
 - Large repos → fine: collection is git-driven and ignore-listed
   (node_modules, dist, .venv, … are never walked); files above 5 MiB and
   symbolic links are not fingerprinted.

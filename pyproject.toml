@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-git"
-version = "4.0.0"
-description = "Git for AI Agent Context — branch, merge, securely sync, drift-check and resume agent state (UACP/1.0)."
+version = "5.0.0"
+description = "Git for AI Agent Context — version, merge, sync, and direct verified handoffs between agents (UACP/1.0)."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }

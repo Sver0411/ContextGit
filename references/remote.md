@@ -4,6 +4,10 @@ V4 adds how Context Git transfers immutable UACP Context Objects between
 machines. It does not define source-code hosting and does not reuse or mutate
 source Git remotes, refs, indexes, branches, or working trees.
 
+V5 reuses the same configured transport and authentication for a separate
+`network.json` namespace. Its additional endpoints and rules are specified in
+[`network.md`](network.md); the V4 Context manifest remains unchanged.
+
 ## Model
 
 A Context remote is an object store with one mutable manifest:

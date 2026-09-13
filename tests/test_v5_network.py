@@ -19,6 +19,7 @@ from context_git.gitstate import collect as git_collect  # noqa: E402
 from context_git.network import (  # noqa: E402
     NetworkError,
     _object_id,
+    _object_meta,
     build_handoff,
     build_profile,
     build_receipt,
@@ -279,6 +280,48 @@ class TestNetworkFileRemoteCLI(TempRepoTest):
         refused = cli(bob, "network", "inbox", expect=6)
         self.assertRegex(refused.stderr, "identity verification|SHA-256")
         self.assertEqual(Store(bob).list_network_objects("handoffs"), [])
+
+    def test_handoff_to_unpublished_context_is_not_cached(self):
+        remote = self._remote()
+        alice = self._setup_sender(remote)
+        bob = self._setup_recipient(remote)
+        sent = json.loads(cli(alice, "network", "send", "bob", "--json").stdout)
+        old_id = sent["handoff"]["handoff_id"]
+        handoff = copy.deepcopy(sent["handoff"])
+        handoff["context_id"] = "ctx_deadbeef"
+        handoff["handoff_id"] = _object_id("hnd", handoff, "handoff_id")
+
+        network_manifest_path = remote / "network.json"
+        manifest = json.loads(network_manifest_path.read_text(encoding="utf-8"))
+        del manifest["handoffs"][old_id]
+        manifest["handoffs"][handoff["handoff_id"]] = _object_meta(handoff)
+        network_manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        object_path = remote / "network" / "handoffs" / (
+            handoff["handoff_id"] + ".json"
+        )
+        object_path.write_text(
+            json.dumps(handoff, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        refused = cli(bob, "network", "inbox", expect=6)
+        self.assertIn("missing from the remote manifest", refused.stderr)
+        self.assertEqual(Store(bob).list_network_objects("handoffs"), [])
+
+    def test_verify_scans_malformed_network_cache_files(self):
+        root = self._repo()
+        cli(root, "init")
+        directory = Store(root).network_handoffs_dir
+        directory.mkdir(parents=True)
+        (directory / "malformed.json").write_text(
+            '{"note":"token=ghp_abcdefghijklmnopqrstuvwxyz123456"}\n',
+            encoding="utf-8",
+        )
+        result = cli(root, "verify", expect=2)
+        self.assertIn("potential leak", result.stdout)
 
     def test_handoff_expiry_and_wrong_recipient_are_refused(self):
         remote = self._remote()

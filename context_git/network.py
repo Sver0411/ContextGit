@@ -450,6 +450,23 @@ def _download_network_objects(store, transport, manifest):
     return downloaded
 
 
+def _validate_context_pointers(downloaded, remote_manifest, local_store=None):
+    advertised = remote_manifest.get("objects") or {}
+    for handoff in downloaded["handoffs"].values():
+        if handoff["context_id"] not in advertised:
+            raise NetworkError(
+                "handoff {} points to a Context missing from the remote manifest".format(
+                    handoff["handoff_id"]
+                )
+            )
+        if local_store is not None and local_store.load_context(handoff["context_id"]) is None:
+            raise NetworkError(
+                "handoff {} Context was not fetched; retry network sync".format(
+                    handoff["handoff_id"]
+                )
+            )
+
+
 def register(store, remote_name, transport, agent_id, display_name, adapter,
              allow_other_project=False, force=False):
     project = project_descriptor(store.root, store)
@@ -462,7 +479,8 @@ def register(store, remote_name, transport, agent_id, display_name, adapter,
     manifest, state = _load_network(
         transport, project, allow_other_project=allow_other_project
     )
-    _download_network_objects(store, transport, manifest)
+    downloaded = _download_network_objects(store, transport, manifest)
+    _validate_context_pointers(downloaded, remote_manifest)
     agent_id = validate_agent_id(agent_id)
     local_identity = store.network_identity()
     if agent_id in manifest["agents"] and not (
@@ -517,7 +535,8 @@ def send(store, remote_name, transport, recipient, branch, message=None,
         transport, project, required=True,
         allow_other_project=allow_other_project,
     )
-    _download_network_objects(store, transport, manifest)
+    downloaded = _download_network_objects(store, transport, manifest)
+    _validate_context_pointers(downloaded, remote_manifest)
     recipient = validate_agent_id(recipient)
     if recipient not in manifest["agents"]:
         raise NetworkError("recipient is not registered on this network: {}".format(recipient))
@@ -537,11 +556,18 @@ def send(store, remote_name, transport, recipient, branch, message=None,
 
 def sync(store, remote_name, transport, allow_other_project=False):
     project = project_descriptor(store.root, store)
+    remote_manifest, _ = transport.read_manifest(required=True)
+    validate_manifest(remote_manifest)
+    try:
+        _check_project(project, remote_manifest.get("project"), allow_other_project)
+    except RemoteError as exc:
+        raise NetworkError(str(exc))
     manifest, _ = _load_network(
         transport, project, required=True,
         allow_other_project=allow_other_project,
     )
     downloaded = _download_network_objects(store, transport, manifest)
+    _validate_context_pointers(downloaded, remote_manifest, local_store=store)
 
     added = 0
     for kind in ("handoffs", "receipts"):
@@ -613,11 +639,18 @@ def reply(store, remote_name, transport, handoff_id, status, message=None,
         raise NetworkError("unknown local handoff; sync the inbox first")
     receipt = build_receipt(handoff, identity["agent_id"], status, message)
     project = project_descriptor(store.root, store)
+    remote_manifest, _ = transport.read_manifest(required=True)
+    validate_manifest(remote_manifest)
+    try:
+        _check_project(project, remote_manifest.get("project"), allow_other_project)
+    except RemoteError as exc:
+        raise NetworkError(str(exc))
     manifest, state = _load_network(
         transport, project, required=True,
         allow_other_project=allow_other_project,
     )
     downloaded = _download_network_objects(store, transport, manifest)
+    _validate_context_pointers(downloaded, remote_manifest)
     if handoff_id not in manifest["handoffs"]:
         raise NetworkError("handoff is no longer advertised by the network")
     existing_receipts = [

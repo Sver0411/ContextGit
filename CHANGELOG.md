@@ -2,6 +2,25 @@
 
 All notable changes to Context Git are documented here.
 
+## 5.0.0 — 2026-09-13
+
+- Added the Agent Context Network: registered Agent identities and capability
+  profiles on top of an existing V4 Context remote.
+- Added directed, content-addressed Context Handoffs with optional expiry,
+  compact intent, recipient compatibility, and pointers to published Contexts.
+- Added `network register`, `agents`, `send`, `inbox`, `accept`, `reply`, and
+  `status` commands with stable JSON output and a dedicated exit code.
+- Added immutable accepted/completed/rejected receipts and validated lifecycle
+  transitions, including terminal-state and recipient-ownership enforcement.
+- Added file and authenticated HTTP network storage with full SHA-256/size
+  verification, bounded objects, shared writer locking, and ETag concurrency.
+- Added local handoff branches that never modify source files, source Git refs,
+  the index, or the working tree.
+- Added takeover protection, remote-replacement identity invalidation, secret
+  redaction/scanning, cross-project checks, and fail-closed graph validation.
+- Published normative network, handoff, and receipt schemas plus an endpoint
+  contract and explicit trust-boundary documentation.
+
 ## 4.0.0 — 2026-09-13
 
 - Added named Context remotes and `remote`, `push`, `fetch`, and `pull`

@@ -718,10 +718,12 @@ def cmd_verify(root, args):
         targets.append(store.context_path(resolved))
     else:
         targets = [store.context_path(cid) for cid in store.list_context_ids()]
-        for kind in ("handoffs", "receipts"):
-            for obj in store.list_network_objects(kind):
-                key = "handoff_id" if kind == "handoffs" else "receipt_id"
-                targets.append(store._network_object_path(kind, obj[key]))
+        for directory in (store.network_handoffs_dir, store.network_receipts_dir):
+            if directory.is_dir() and not directory.is_symlink():
+                targets.extend(
+                    path for path in sorted(directory.glob("*.json"))
+                    if path.is_file() and not path.is_symlink()
+                )
         handoff = store.dir / "HANDOFF.md"
         if handoff.is_file():
             targets.append(handoff)

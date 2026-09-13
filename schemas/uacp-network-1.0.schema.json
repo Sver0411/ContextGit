@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Sver0411/ContextGit/schemas/uacp-network-1.0.schema.json",
+  "title": "UACP Agent Context Network Manifest 1.0",
+  "type": "object",
+  "required": ["format", "version", "protocol", "updated_at", "project", "agents", "handoffs", "receipts"],
+  "properties": {
+    "format": {"const": "context-git-network"},
+    "version": {"const": "1.0"},
+    "protocol": {"const": "UACP/1.0"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "project": {"$ref": "#/$defs/project"},
+    "agents": {
+      "type": "object",
+      "maxProperties": 1000,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9._-]{1,63}$"},
+      "additionalProperties": {"$ref": "#/$defs/profile"}
+    },
+    "handoffs": {"$ref": "#/$defs/handoffIndex"},
+    "receipts": {"$ref": "#/$defs/receiptIndex"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "project": {
+      "type": "object",
+      "required": ["name", "repository_fingerprint"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "repository_fingerprint": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^sha256:[0-9a-f]{24}$"}
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "capabilityList": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"}
+    },
+    "profile": {
+      "type": "object",
+      "required": ["agent_id", "display_name", "adapter", "capabilities", "capability_profile", "created_at", "updated_at"],
+      "properties": {
+        "agent_id": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{1,63}$"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 120},
+        "adapter": {"type": "string", "minLength": 1, "maxLength": 80},
+        "capabilities": {"$ref": "#/$defs/capabilityList"},
+        "capability_profile": {
+          "type": "object",
+          "maxProperties": 50,
+          "propertyNames": {"pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"},
+          "additionalProperties": {
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+              "status": {"enum": ["available", "declared", "unavailable", "unknown"]}
+            },
+            "additionalProperties": true
+          }
+        },
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": true
+    },
+    "objectMeta": {
+      "type": "object",
+      "required": ["sha256", "size"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 1048576}
+      },
+      "additionalProperties": true
+    },
+    "handoffIndex": {
+      "type": "object",
+      "propertyNames": {"pattern": "^hnd_[0-9a-f]{16}$"},
+      "additionalProperties": {"$ref": "#/$defs/objectMeta"}
+    },
+    "receiptIndex": {
+      "type": "object",
+      "propertyNames": {"pattern": "^rcp_[0-9a-f]{16}$"},
+      "additionalProperties": {"$ref": "#/$defs/objectMeta"}
+    }
+  }
+}

@@ -1,0 +1,35 @@
+$ context-git network register alice --name Alice --agent codex
+registered alice (Alice) on origin
+capabilities: browser, filesystem, git, network, node, python, shell
+
+$ context-git network agents
+alice                Alice                    browser, filesystem, git, network, node, python, shell
+bob                  Bob                      filesystem, git, python, shell
+
+$ context-git push origin main
+Pushed main to origin at ctx_8f31d2a0 (1 object uploaded)
+
+$ context-git network send bob -m "Review the auth boundary"
+sent hnd_0123456789abcdef to bob via origin
+Context: ctx_8f31d2a0 (main)
+recipient compatibility: 75% · missing browser
+
+# On Bob's checkout
+$ context-git network inbox
+Inbox for bob
+  hnd_0123456789abcdef  alice → bob  ctx_8f31d2a0  [pending]
+    Review the auth boundary
+network objects received: 1
+
+$ context-git network accept hnd_0123456789abcdef --switch
+accepted hnd_0123456789abcdef as branch handoff/alice/01234567 at ctx_8f31d2a0
+switched Context HEAD to handoff/alice/01234567
+
+$ context-git network reply hnd_0123456789abcdef completed -m "Review finished"
+published completed receipt rcp_fedcba9876543210 for hnd_0123456789abcdef
+
+# Back on Alice's checkout
+$ context-git network status hnd_0123456789abcdef
+Sent handoffs
+  hnd_0123456789abcdef  alice → bob  ctx_8f31d2a0  [completed]
+    Review the auth boundary
