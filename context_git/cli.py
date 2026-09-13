@@ -17,6 +17,8 @@ Commands:
     branch                   list/create/delete context branches
     switch                   switch the active context branch
     merge                    three-way merge another context branch
+    remote                   configure Context remotes
+    push / fetch / pull      synchronize immutable Context objects and refs
 
 Global flags: --root, --json, -q. Run from any directory inside the project.
 Standard library only.
@@ -37,6 +39,10 @@ from .capabilities import compatibility_report, detect_agent, load_adapters
 from .diff import semantic_diff, render as render_diff
 from .drift import check as drift_check, format_report
 from .merge import MergeError, merge_contexts
+from .remote import (
+    RemoteError, create_transport, fetch as remote_fetch,
+    make_remote_config, pull as remote_pull, push as remote_push,
+)
 from .render import handoff_md, log as render_log, resume_briefing, show as render_show
 from .security import redact, scan_object
 from .sessions import (
@@ -506,12 +512,17 @@ def cmd_branch(root, args):
 
     branches = store.list_branches()
     current = store.current_branch()
+    remote_refs = store.list_remote_refs() if args.all else {}
     if args.json:
         print(json.dumps({
             "current": current,
             "branches": [
                 {"name": name, "context_id": ctx_id, "current": name == current}
                 for name, ctx_id in branches.items()
+            ],
+            "remote_branches": [
+                {"name": name, "context_id": ctx_id}
+                for name, ctx_id in remote_refs.items()
             ],
         }, indent=2, ensure_ascii=False))
     else:
@@ -521,6 +532,8 @@ def cmd_branch(root, args):
             ))
         if not branches:
             print("(no context branches)")
+        for name, ctx_id in remote_refs.items():
+            print("  {:24} {}".format("remotes/" + name, ctx_id))
     return 0
 
 
@@ -652,7 +665,9 @@ def cmd_merge(root, args):
     merge_meta = {
         "base_context_id": base_id,
         "source_context_id": theirs_id,
-        "source_ref": args.source if args.source in store.list_branches() else None,
+        "source_ref": args.source if (
+            args.source in store.list_branches() or args.source.startswith("remote:")
+        ) else None,
         "strategy": "three-way",
         "resolved_conflicts": plan["resolved"],
     }
@@ -767,6 +782,178 @@ def cmd_capabilities(root, args):
     print("  Effective: {}".format(
         ", ".join(payload["effective_capabilities"]) or "(none)"
     ))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# V4 remote synchronization
+# --------------------------------------------------------------------------
+
+def _require_store(root):
+    store = Store(root)
+    if not store.exists():
+        raise StoreError("no context store here — run `context-git init` first")
+    return store
+
+
+def _select_remote(store, requested=None):
+    remotes = store.remotes()
+    if requested:
+        name = store.validate_remote_name(requested)
+        if name not in remotes:
+            raise RemoteError("unknown remote: {}".format(name))
+        config = remotes[name]
+        if not isinstance(config, dict):
+            raise RemoteError("remote configuration is invalid: {}".format(name))
+        return name, config
+    if "origin" in remotes:
+        config = remotes["origin"]
+        if not isinstance(config, dict):
+            raise RemoteError("remote configuration is invalid: origin")
+        return "origin", config
+    if len(remotes) == 1:
+        name = next(iter(remotes))
+        config = remotes[name]
+        if not isinstance(config, dict):
+            raise RemoteError("remote configuration is invalid: {}".format(name))
+        return name, config
+    if not remotes:
+        raise RemoteError("no remotes configured; run `context-git remote add NAME URL`")
+    raise RemoteError("multiple remotes configured; specify one explicitly")
+
+
+def cmd_remote_list(root, args):
+    store = _require_store(root)
+    remotes = store.remotes()
+    if args.json:
+        print(json.dumps({"remotes": remotes}, indent=2, ensure_ascii=False))
+    elif not remotes:
+        print("(no context remotes)")
+    else:
+        for name, config in sorted(remotes.items()):
+            if not isinstance(config, dict):
+                print("{}  (invalid configuration)".format(name))
+                continue
+            auth = " · auth env {}".format(config["auth_env"]) \
+                if config.get("auth_env") else ""
+            print("{}  {}{}".format(name, config.get("url"), auth))
+    return 0
+
+
+def cmd_remote_add(root, args):
+    store = _require_store(root)
+    name = store.validate_remote_name(args.name)
+    if name in store.remotes() and not args.force:
+        raise RemoteError("remote already exists: {}; use --force to replace it".format(name))
+    config = make_remote_config(
+        args.url, root, auth_env=args.auth_env,
+        allow_insecure_http=args.allow_insecure_http,
+    )
+    store.set_remote(name, config)
+    if args.json:
+        print(json.dumps({"name": name, **config}, indent=2, ensure_ascii=False))
+    else:
+        print("configured context remote {} → {}".format(name, config["url"]))
+        if config.get("auth_env"):
+            print("credential source: environment variable {} (value not stored)".format(
+                config["auth_env"]
+            ))
+    return 0
+
+
+def cmd_remote_remove(root, args):
+    store = _require_store(root)
+    store.delete_remote_refs(args.name)
+    store.remove_remote(args.name)
+    if args.json:
+        print(json.dumps({"removed": args.name}, indent=2))
+    else:
+        print("removed context remote {} and its tracking refs".format(args.name))
+        print("local Context Objects were retained")
+    return 0
+
+
+def cmd_remote_show(root, args):
+    store = _require_store(root)
+    name, config = _select_remote(store, args.name)
+    refs = store.list_remote_refs(name)
+    payload = {"name": name, "config": config, "tracking_refs": refs}
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print("Context Remote {}".format(name))
+        print("  URL: {}".format(config.get("url")))
+        print("  Auth env: {}".format(config.get("auth_env") or "(none)"))
+        for branch, ctx_id in refs.items():
+            print("  {}/{} → {}".format(name, branch, ctx_id))
+    return 0
+
+
+def _render_sync_result(result, args):
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    action = result.get("action")
+    if action == "push":
+        prefix = "would push" if result.get("dry_run") else "pushed"
+        print("{} {}/{} at {}".format(
+            prefix, result["remote"], result["branch"], result["context_id"]
+        ))
+        print("objects: {} new / {} reachable".format(
+            result["objects_uploaded"], result["objects_total"]
+        ))
+    elif action == "fetch":
+        print("fetched {}: {} new object(s), {} verified".format(
+            result["remote"], result["objects_received"], result["objects_verified"]
+        ))
+        for branch, ctx_id in result.get("refs", {}).items():
+            print("  remote:{}/{} → {}".format(result["remote"], branch, ctx_id))
+    else:
+        print("pulled {}/{}: {} ({} → {})".format(
+            result["remote"], result["branch"], action,
+            result.get("from") or "(unborn)", result.get("to"),
+        ))
+
+
+def cmd_push(root, args):
+    store = _require_store(root)
+    remote_name, config = _select_remote(store, args.remote)
+    branch = args.branch or store.current_branch()
+    if not branch:
+        raise RemoteError("detached context HEAD has no branch to push")
+    result = remote_push(
+        store, remote_name, branch, create_transport(config, root),
+        force=args.force, dry_run=args.dry_run,
+        allow_other_project=args.allow_other_project,
+    )
+    _render_sync_result(result, args)
+    return 0
+
+
+def cmd_fetch(root, args):
+    store = _require_store(root)
+    remote_name, config = _select_remote(store, args.remote)
+    result = remote_fetch(
+        store, remote_name, create_transport(config, root), branch=args.branch,
+        allow_other_project=args.allow_other_project,
+    )
+    _render_sync_result(result, args)
+    return 0
+
+
+def cmd_pull(root, args):
+    store = _require_store(root)
+    remote_name, config = _select_remote(store, args.remote)
+    branch = args.branch or store.current_branch()
+    if not branch:
+        raise RemoteError("cannot pull into detached context HEAD")
+    result = remote_pull(
+        store, remote_name, branch, create_transport(config, root),
+        allow_other_project=args.allow_other_project,
+    )
+    if result.get("action") == "fast-forward":
+        _refresh_handoff(root, store)
+    _render_sync_result(result, args)
     return 0
 
 
@@ -971,6 +1158,8 @@ def build_parser():
     p.add_argument("name", nargs="?", help="new context branch name")
     p.add_argument("start", nargs="?", help="start context or branch (default: HEAD)")
     p.add_argument("-d", "--delete", metavar="NAME", help="delete a branch ref; keep contexts")
+    p.add_argument("-a", "--all", action="store_true",
+                   help="also show remote-tracking context branches")
     p.set_defaults(func=cmd_branch, set=[], no_prompt=True, message=None,
                    allow_empty=False, agent=None, ctx_id=None, limit=None,
                    targets=None, write_briefing=False)
@@ -1007,6 +1196,54 @@ def build_parser():
     p.add_argument("--agent", default=None, help="source agent name override")
     p.set_defaults(func=cmd_merge, set=[], no_prompt=True, allow_empty=False,
                    ctx_id=None, limit=None, targets=None, write_briefing=False)
+
+    # V4 remote configuration uses a nested command to keep credentials and
+    # destructive removal explicit in the visible CLI grammar.
+    p = sub.add_parser(
+        "remote", parents=[common], help="configure Context remotes",
+    )
+    p.set_defaults(func=cmd_remote_list)
+    remote_sub = p.add_subparsers(dest="remote_action")
+
+    rp = remote_sub.add_parser("add", parents=[common], help="add a Context remote")
+    rp.add_argument("name", help="remote name, commonly origin")
+    rp.add_argument("url", help="file path/file:// URL, or HTTPS endpoint")
+    rp.add_argument("--auth-env", help="environment variable containing a bearer token")
+    rp.add_argument("--allow-insecure-http", action="store_true",
+                    help="allow plain HTTP only for localhost/loopback")
+    rp.add_argument("--force", action="store_true", help="replace an existing config")
+    rp.set_defaults(func=cmd_remote_add)
+
+    rp = remote_sub.add_parser("remove", parents=[common], help="remove a remote config")
+    rp.add_argument("name")
+    rp.set_defaults(func=cmd_remote_remove)
+
+    rp = remote_sub.add_parser("show", parents=[common], help="show config and tracking refs")
+    rp.add_argument("name", nargs="?", help="remote name (default: origin or only remote)")
+    rp.set_defaults(func=cmd_remote_show)
+
+    p = sub.add_parser("push", parents=[common], help="push a Context branch to a remote")
+    p.add_argument("remote", nargs="?", help="remote name (default: origin or only remote)")
+    p.add_argument("branch", nargs="?", help="local context branch (default: current)")
+    p.add_argument("--force", action="store_true", help="allow non-fast-forward ref update")
+    p.add_argument("--dry-run", action="store_true", help="validate and preview without writing")
+    p.add_argument("--allow-other-project", action="store_true",
+                   help="allow sync with a mismatched project identity")
+    p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("fetch", parents=[common], help="fetch Context objects and tracking refs")
+    p.add_argument("remote", nargs="?", help="remote name (default: origin or only remote)")
+    p.add_argument("--branch", help="fetch/update one remote branch only")
+    p.add_argument("--allow-other-project", action="store_true",
+                   help="allow sync with a mismatched project identity")
+    p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("pull", parents=[common], help="fetch and fast-forward a Context branch")
+    p.add_argument("remote", nargs="?", help="remote name (default: origin or only remote)")
+    p.add_argument("branch", nargs="?", help="remote/current branch (default: current)")
+    p.add_argument("--allow-other-project", action="store_true",
+                   help="allow sync with a mismatched project identity")
+    p.set_defaults(func=cmd_pull)
 
     p = sub.add_parser("verify", parents=[common], help="residual secret scan over the store")
     p.add_argument("ctx_id", nargs="?", default=None, help="scan one context only")
@@ -1112,6 +1349,9 @@ def main(argv=None):
     except MergeError as exc:
         eprint("merge refused: {}".format(exc))
         return 4
+    except RemoteError as exc:
+        eprint("remote refused: {}".format(exc))
+        return 5
     except KeyboardInterrupt:
         eprint("\ninterrupted.")
         return 130

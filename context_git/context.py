@@ -596,6 +596,30 @@ def compute_context_id(payload, parent_id, parent_ids=None):
     return "ctx_" + h.hexdigest()[:8]
 
 
+def verify_context_id(payload):
+    """Verify an object's id using the writer generation that created it.
+
+    V1/V2 hashed the scalar parent directly. V3+ objects carry
+    ``parent_context_ids`` and hash the canonical parent array. Supporting
+    both makes remote transport able to authenticate old immutable objects.
+    """
+    if not isinstance(payload, dict) or not payload.get("context_id"):
+        return False
+    parent_id = payload.get("parent_context_id")
+    if "parent_context_ids" in payload:
+        expected = compute_context_id(
+            payload, parent_id, payload.get("parent_context_ids") or []
+        )
+    else:
+        h = hashlib.sha256()
+        h.update((parent_id or "root").encode("utf-8"))
+        h.update(str(payload.get("created_at") or "").encode("utf-8"))
+        h.update(((payload.get("git") or {}).get("head") or "no-git").encode("utf-8"))
+        h.update(_canonical(core_view(payload)).encode("utf-8"))
+        expected = "ctx_" + h.hexdigest()[:8]
+    return payload.get("context_id") == expected
+
+
 def is_meaningful_change(prev_obj, new_obj):
     """True if the new context differs from its parent in any core field."""
     if prev_obj is None:

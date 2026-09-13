@@ -42,6 +42,7 @@ class Store:
         self.dir = self.root / ".context-git"
         self.contexts_dir = self.dir / "contexts"
         self.refs_dir = self.dir / "refs" / "heads"
+        self.remote_refs_dir = self.dir / "refs" / "remotes"
         self.head_file = self.dir / "HEAD"
         self.config_file = self.dir / "config.json"
 
@@ -59,7 +60,7 @@ class Store:
             write_text(self._ref_path("main"), "")
             self._write_symbolic_head("main", None)
         config = {
-            "version": 2,
+            "version": 3,
             "created_at": utc_now_iso(),
             "tool": {"name": tool_name, "version": tool_version},
             "notes": "Append-only context store. Do not commit secrets into "
@@ -77,7 +78,9 @@ class Store:
         Context branch names deliberately support fewer edge cases than Git
         refs. This keeps refs safe on Windows and prevents path traversal.
         """
-        name = str(name or "").strip().replace("\\", "/")
+        name = str(name or "").strip()
+        if "\\" in name:
+            raise StoreError("invalid context branch name: {!r}".format(name))
         parts = name.split("/")
         if (
             not name or name.startswith("/") or name.endswith("/")
@@ -253,15 +256,146 @@ class Store:
             parent = parent.parent
 
     def resolve(self, name):
-        """Resolve HEAD, a context id, or a context branch to a context id."""
+        """Resolve HEAD, a context id, local branch, or ``remote:NAME/BRANCH``."""
         if name in (None, "HEAD"):
             return self.head()
         if CTX_ID_RE.match(str(name)):
             return str(name) if self.load_context(str(name)) is not None else None
+        if str(name).startswith("remote:"):
+            selector = str(name)[7:]
+            if "/" not in selector:
+                return None
+            remote, branch = selector.split("/", 1)
+            try:
+                return self.list_remote_refs(remote).get(branch)
+            except StoreError:
+                return None
         try:
             return self.list_branches().get(self.validate_branch_name(name))
         except StoreError:
             return None
+
+    # -- V4 remotes and remote-tracking refs --------------------------------
+
+    @staticmethod
+    def validate_remote_name(name):
+        name = str(name or "").strip()
+        if "/" in name or "\\" in name or not BRANCH_PART_RE.match(name):
+            raise StoreError("invalid remote name: {!r}".format(name))
+        if name.endswith((".", ".lock")):
+            raise StoreError("invalid remote name: {!r}".format(name))
+        return name
+
+    def load_config(self):
+        return read_json(self.config_file) or {}
+
+    def save_config(self, config):
+        write_json(self.config_file, config)
+
+    def remotes(self):
+        value = self.load_config().get("remotes") or {}
+        return value if isinstance(value, dict) else {}
+
+    def set_remote(self, name, config):
+        name = self.validate_remote_name(name)
+        current = self.load_config()
+        remotes = current.get("remotes")
+        if not isinstance(remotes, dict):
+            remotes = {}
+        remotes[name] = dict(config)
+        current["remotes"] = remotes
+        try:
+            config_version = int(current.get("version") or 1)
+        except (TypeError, ValueError):
+            config_version = 1
+        current["version"] = max(3, config_version)
+        self.save_config(current)
+
+    def remove_remote(self, name):
+        name = self.validate_remote_name(name)
+        current = self.load_config()
+        remotes = current.get("remotes") or {}
+        if not isinstance(remotes, dict):
+            raise StoreError("remote configuration is invalid")
+        if name not in remotes:
+            raise StoreError("unknown remote: {}".format(name))
+        del remotes[name]
+        current["remotes"] = remotes
+        self.save_config(current)
+
+    def delete_remote_refs(self, name):
+        """Delete only one validated remote-tracking ref tree."""
+        root = self._remote_ref_root(name)
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise StoreError("refusing unsafe remote-tracking ref path")
+        paths = sorted(root.rglob("*"), key=lambda path: len(path.parts), reverse=True)
+        if any(path.is_symlink() for path in paths):
+            raise StoreError("refusing symlink in remote-tracking refs")
+        for path in paths:
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+        root.rmdir()
+
+    def _remote_ref_root(self, remote):
+        remote = self.validate_remote_name(remote)
+        root = self.remote_refs_dir / remote
+        try:
+            root.resolve().relative_to(self.remote_refs_dir.resolve())
+        except (OSError, ValueError):
+            raise StoreError("remote ref escapes refs directory")
+        return root
+
+    def _remote_ref_path(self, remote, branch):
+        branch = self.validate_branch_name(branch)
+        root = self._remote_ref_root(remote)
+        path = root.joinpath(*branch.split("/"))
+        try:
+            path.resolve().relative_to(root.resolve())
+        except (OSError, ValueError):
+            raise StoreError("remote branch escapes refs directory")
+        return path
+
+    def set_remote_ref(self, remote, branch, ctx_id):
+        if self.load_context(ctx_id) is None:
+            raise StoreError("cannot track missing context: {}".format(ctx_id))
+        write_text(self._remote_ref_path(remote, branch), ctx_id + "\n")
+
+    def list_remote_refs(self, remote=None):
+        """Return branch refs for one remote, or ``remote/branch`` for all."""
+        roots = []
+        if remote is not None:
+            remote = self.validate_remote_name(remote)
+            roots = [(remote, self._remote_ref_root(remote))]
+        elif self.remote_refs_dir.is_dir():
+            roots = [
+                (path.name, path) for path in self.remote_refs_dir.iterdir()
+                if path.is_dir() and not path.is_symlink()
+            ]
+        result = {}
+        for remote_name, root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                self.validate_remote_name(remote_name)
+            except StoreError:
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                branch = path.relative_to(root).as_posix()
+                try:
+                    self.validate_branch_name(branch)
+                    value = path.read_text(encoding="utf-8", errors="replace").strip()
+                except (OSError, StoreError):
+                    continue
+                if CTX_ID_RE.match(value) and self.load_context(value) is not None:
+                    key = branch if remote is not None else remote_name + "/" + branch
+                    result[key] = value
+        return dict(sorted(result.items()))
 
     def head_object(self):
         ctx_id = self.head()
@@ -385,6 +519,8 @@ class Store:
         for branch, ctx_id in self.list_branches().items():
             if ctx_id:
                 result.setdefault(ctx_id, []).append(branch)
+        for remote_branch, ctx_id in self.list_remote_refs().items():
+            result.setdefault(ctx_id, []).append("remotes/" + remote_branch)
         return result
 
     def previous_head(self, before_id=None):
@@ -443,6 +579,7 @@ class Store:
             "head": self.head(),
             "branch": self.current_branch(),
             "branch_count": len(self.list_branches()),
+            "remote_count": len(self.remotes()),
             "oldest": ids[0] if ids else None,
             "newest": ids[-1] if ids else None,
         }
