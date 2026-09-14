@@ -102,8 +102,20 @@ file URLs and unsafe symlinks are refused.
 
 Pushes take an exclusive `.context-git.lock`, compare the manifest state seen
 during negotiation, write immutable objects, and replace the manifest
-atomically. A lock means another writer is active. If a writer terminated
-abnormally, inspect the remote before manually removing a stale lock.
+atomically. The lock is created with `O_CREAT | O_EXCL`, which is what
+actually excludes a concurrent writer; its **body** carries `{pid, host,
+operation, created_at}` so a lock left behind by a crash can be attributed
+rather than guessed at.
+
+A lock means another writer may be active. Never delete it by hand and never
+treat age as proof of death — an old timestamp on a live pid is still a live
+writer. `remote show` reports the lock, and `remote unlock REMOTE` clears it
+**only** when the pid is provably gone on this host. Anything else — a live
+pid, a lock written on another host, a legacy or malformed body, or a platform
+where liveness cannot be probed — requires an explicit `--force`. The tool
+never clears a lock automatically, even when it looks stale: the deliberate
+trade is that a crashed writer costs one explicit command, whereas a wrongly
+cleared lock costs mutual exclusion.
 
 The file remote is suitable for a trusted shared disk or a folder synchronized
 by another system. That system must preserve file contents and atomic renames.

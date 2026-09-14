@@ -10,7 +10,9 @@ This document explains intent, defaults and prohibited content per field.
 | `protocol` | const `"UACP"` | discriminator |
 | `protocol_version` | `"1.0"` | semantics version; readers accept any 1.x |
 | `schema_version` | `"1.1"` | V3 additive fields; older `1.0` objects remain valid |
-| `context_id` | `ctx_<8hex>` | sha256(parent ids, timestamp, HEAD, core payload) |
+| `context_id` | `ctx_<8hex>` or `ctx_<16hex>` | sha256(lineage, timestamp, HEAD, core payload) at the width declared by `id_hash_version` |
+| `id_hash_version` | `1` \| `2` (optional) | id generation: 1/absent = 8 hex (V1–V5.0.0), 2 = 16 hex (V5.0.1+) |
+| `core_view_version` | `1` \| `2` (optional) | core view the id was hashed over: 1/absent = no fingerprints, 2 = includes them |
 | `parent_context_id` | id \| null | first parent; null = root context |
 | `parent_context_ids` | id[] | V3 DAG lineage: 0 root, 1 ordinary, 2 merge |
 | `context_branch` | string \| null | branch at object creation; refs are authoritative |

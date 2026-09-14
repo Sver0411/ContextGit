@@ -10,8 +10,10 @@ where the edges are.
 | Threat | Consequence | Defence |
 |---|---|---|
 | Secret in source notes ("the key is sk-abc…") | key persisted into `.context-git/` | content redaction pre-write (layer 2) |
-| Tool reads `.env` / key files while collecting state | secret enters fingerprint/file lists | path-level denial (layer 1) |
+| Tool reads `.env` / key files while collecting state | secret enters fingerprint/file lists | path-level denial (layer 1), case- and trailing-dot/space-normalised |
 | Sensitive path recorded as "important file" | leaks project structure of secret stores | forbidden-path filter before selection |
+| A case variant (`.ENV`, `ID_RSA`) slips past a case-sensitive check | credential file read or named in the report | every path comparison is `casefold()`ed on every platform, never Windows-only |
+| Locally stored Context edited by hand | an agent acts on a briefing that is confidently false | `verify` recomputes the id from the object's own contents; `resume` fails closed with exit 7 |
 | git commit subjects / changed paths contain tokens | token lands in `git` block | every free-text field passes `redact()` |
 | Redaction bug ships a secret anyway | leaked on disk | residual scan **before write** aborts the commit (`scan_object`), plus post-hoc `context-git verify` |
 | Context store committed to a public repo | historical leak | redaction runs at write time; we never "store now, scrub later" |
@@ -32,6 +34,15 @@ These are never read, hashed, fingerprinted, or listed:
 * `secrets.{yml,yaml,json}`, `terraform.tfstate`
 * anything under `.ssh/`, `.aws/`, `.gnupg/`, `.kube/`, `.docker/`
 * backup copies: `*.env.bak`, `secret.key.old`, `token.txt.swp`, …
+
+Matching is **case-insensitive and trailing-dot/space-insensitive on every
+platform**, not only on Windows. `.ENV`, `.Env`, `.SSH/config`, `.AWS/CREDENTIALS`,
+`ID_RSA`, `SECRET.PEM`, `PRIVATE.KEY` and `TOKEN.BAK` are refused exactly like
+their lowercase spellings, and so is a path whose *any* segment is the tool's
+own store (`.GIT/`, `.CONTEXT-GIT/`, including a nested store deeper in the
+tree). A case-sensitive check would silently stop protecting a repository the
+moment it is read on a case-preserving/case-insensitive filesystem, so the
+rule is normalised everywhere rather than special-cased per platform.
 
 The filter is deliberately over-inclusive: a false positive costs one file
 in a report; a false negative costs the user a credential.
@@ -111,9 +122,17 @@ source file inside the repository is excluded from `important_files`.
 - HTTPS bearer values are read only from the configured environment variable
   at request time. URL-embedded credentials, query/fragment data, redirects,
   external plain HTTP, and missing credentials fail closed.
-- File remotes use an exclusive lock and state comparison. HTTPS remotes must
+- File remotes use an exclusive `O_CREAT|O_EXCL` lock plus state comparison.
+  The lock body records pid, host, operation and timestamp, is reported by
+  `remote show`, and is cleared only by an explicit `remote unlock` — never
+  automatically and never on age alone. HTTPS remotes must
   expose an ETag and honor `If-Match`/`If-None-Match`; `409`/`412` means retry
   after fetching. Push is non-fast-forward by default.
+- Local Context Objects get the same identity treatment as transported ones:
+  `verify` recomputes each id from its own contents, checks first-parent
+  alignment, validates lineage shape and reports dangling parent references,
+  and `resume` refuses (exit 7) rather than briefing an agent from an object
+  that does not verify. `load` stays deliberately cheap and is not a gate.
 
 ## V5 Agent Context Network boundary
 

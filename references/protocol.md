@@ -71,10 +71,20 @@ ctx_a1 (root)
   valid linear first-parent view.
 * Contexts are **immutable**. Correction = create a new context whose
   parent is the same as the wrong one's (or record an explicit decision).
-* `context_id` is `ctx_` + 8 hex chars of
+* `context_id` is `ctx_` + hex chars of
   `sha256(parent_ids ‖ created_at ‖ repo_HEAD ‖ canonical_core_payload)`.
   The timestamp guarantees uniqueness; the payload hash makes ids
   self-verifying (recompute and compare).
+* Two id generations exist and both MUST remain verifiable. `id_hash_version`
+  1 (absent on V1–V5.0.0 objects) truncates to **8** hex chars; version 2
+  (V5.0.1+) truncates to **16** (64-bit). A reader MUST reproduce the id at
+  the width the object declares — never infer the width from the id string
+  itself, or a shortened id could downgrade verification strength.
+* `core_view_version` records which normalised core view the payload hash was
+  taken over: 1 (absent) covers `{path, why}` per important file; 2 adds each
+  important file's content `fingerprint`, so a file whose bytes changed is a
+  real change even when Git's path set, status and diff stat are identical.
+  Absent means 1, which is what keeps older objects verifying.
 * The **context HEAD** is a pointer to the newest context in the chain
   (reference impl: `.context-git/HEAD`). `checkout` moves only this
   pointer — it MUST never touch the user's git repository or files.
@@ -208,13 +218,24 @@ lines that changed".
 ## 8. Drift and validity
 
 Drift compares a context's *observed* evidence against the live repository:
-HEAD movement (+ commit count), branch change, working-tree change set,
-and per-file fingerprint compare for important files.
+HEAD movement (+ commit count), branch change, working-tree **state** (not
+just the path set), and per-file fingerprint compare for important files.
 
 * Drift is **graded**: `NONE / LOW / MEDIUM / HIGH`.
+* **`NONE` is a statement about observed evidence only**: the evidence the
+  context recorded still matches this machine. It does not promote
+  `source_type: "agent"` claims into verified facts. Implementations MUST NOT
+  describe a context as "trusted" or "true" on the strength of a drift grade;
+  the live repository remains the source of truth for code facts.
+* Drift separates **content drift** (a path entered or left the working set,
+  HEAD moved, an important file's fingerprint changed) from **index drift**
+  (the same paths with unchanged bytes moved between Git's staged/unstaged/
+  untracked/conflicted buckets). Index drift is reported at `LOW` and MUST NOT
+  expire a recorded validation result — `git add` does not change the bytes
+  that were built or tested. Comparing path sets alone cannot see it.
 * Invalidation is **local**: stale important files are listed by path and
   only the sections that depend on them are marked stale. The narrative
-  (goal, decisions, constraints) stays trustworthy even when code moved on.
+  (goal, decisions, constraints) stays usable even when code moved on.
 * **Validation freshness**: a recorded `validation` result is STALE when any
   relevant source changed after `observed_at`. Resuming agents MUST treat
   STALE validation as "unknown", not "passing".

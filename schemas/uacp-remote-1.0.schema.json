@@ -38,7 +38,7 @@
           },
           "additionalProperties": {
             "type": "string",
-            "pattern": "^ctx_[0-9a-f]{8,16}$"
+            "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$"
           }
         }
       }
@@ -46,7 +46,7 @@
     "objects": {
       "type": "object",
       "maxProperties": 10000,
-      "propertyNames": { "pattern": "^ctx_[0-9a-f]{8,16}$" },
+      "propertyNames": { "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$" },
       "additionalProperties": {
         "type": "object",
         "required": ["sha256", "size"],

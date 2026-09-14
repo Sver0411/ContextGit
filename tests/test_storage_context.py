@@ -91,7 +91,12 @@ class TestContextBuild(TempRepoTest):
         self.assertEqual(ctx["protocol_version"], "1.0")
         self.assertEqual(ctx["schema_version"], "1.1")
         self.assertTrue(ctx["context_id"].startswith("ctx_"))
-        self.assertRegex(ctx["context_id"], r"^ctx_[0-9a-f]{8}$")
+        # 5.0.1 widened generated ids to 16 hex (64-bit truncated) and records
+        # the generation so older 8-hex objects keep verifying. See
+        # test_v5_1_regressions for the legacy-compatibility coverage.
+        self.assertRegex(ctx["context_id"], r"^ctx_[0-9a-f]{16}$")
+        self.assertEqual(ctx["id_hash_version"], context_mod.ID_HASH_VERSION)
+        self.assertEqual(ctx["core_view_version"], context_mod.CORE_VIEW_VERSION)
 
     def test_evidence_model(self):
         root = self._repo()

@@ -18,6 +18,15 @@ at `.context-git/` in the project. One JSON Context Object per snapshot;
 * **The CLI** captures machine-observable state: git snapshot, important-file
   fingerprints, drift detection, semantic diffs, secret redaction.
 
+## Project root
+
+Every command resolves the project root itself, so run it from anywhere inside
+the project. Precedence: an explicit `--root PATH` always wins; otherwise the
+nearest ancestor containing `.context-git/`; otherwise the containing Git
+repository root; otherwise the working directory. This is also why `init` from
+`repo/src/auth/` writes `repo/.context-git/` rather than nesting a second store.
+Pass `--root` explicitly when a project deliberately holds more than one store.
+
 ## When to trigger
 
 Export/save (create or update contexts):
@@ -72,15 +81,26 @@ Inspect:
 ## Resume workflow (new agent)
 
 1. `python scripts/context_git.py resume` — prints drift report, capability
-   compatibility, and the briefing. **Trust the briefing, not the repo.**
+   compatibility, and the briefing. **The Context is the map; the live
+   repository is the ground truth for code facts.** `resume` refuses to emit a
+   briefing at all if the current Context fails integrity verification, so an
+   exit code 7 means the store must be inspected (`verify`) before you act.
 2. Read `.context-git/HANDOFF.md` only if you need the full narrative view.
-3. If drift is NONE/LOW: continue from `recommended_actions` directly.
+3. If drift is NONE/LOW: continue from `recommended_actions` directly. NONE
+   means the recorded *observed* evidence is still current on this machine — it
+   does not upgrade agent-supplied claims into verified facts. Trust the fields
+   the same way you would trust a colleague's notes: usable, but re-check
+   anything load-bearing against the code before you change behaviour.
 4. If drift is MEDIUM/HIGH: the report lists stale files and stale sections —
    re-read **only those files**, re-run the stale validation, then commit a
    fresh context noting what you re-verified. Never silently trust sections
    the drift engine marked stale.
 5. Do **not** re-explore the repository from scratch. Only read code when a
    needed fact is genuinely absent from the context.
+
+Index-state-only drift (`unstaged → staged` with identical file contents) is
+reported at LOW and never expires a validation result: `git add` does not
+change the bytes that were built or tested.
 
 ## V2 session import (only on explicit request)
 
@@ -149,6 +169,15 @@ state; ordinary snapshot/resume commands remain local.
 6. After fetching on another machine, run `status` or `resume`; observed
    evidence is re-evaluated against that machine's working tree.
 
+A file remote serialises writers with `O_CREAT|O_EXCL` on
+`.context-git.lock`, and the lock body records pid, host, operation and time.
+A crashed or SIGKILLed writer leaves that file behind. Never delete it by
+hand and never assume an old lock is dead — inspect it first with
+`remote show` (it prints the writer lock) and clear it deliberately with
+`remote unlock REMOTE`, which refuses unless the pid is provably gone on this
+host. `--force` is the explicit override for a lock written on another host or
+one whose liveness cannot be probed.
+
 External plain HTTP is forbidden. `--allow-insecure-http` is only for an
 explicit localhost test service. `--allow-other-project` is likewise an
 explicit override, not a recovery default. Remote failures exit 5 and should
@@ -193,10 +222,11 @@ remote's TLS, bearer scope and access control. Network protocol failures exit
 - `branch [NAME] [START]` / `branch -d NAME` — list, create, or delete refs
 - `switch NAME` / `switch -c NAME [--start REV]` — change context branch
 - `merge SOURCE [--dry-run]` — fast-forward or three-way semantic merge
-- `remote [add|show|remove]` — manage Context-only remote endpoints
+- `remote [add|show|remove|unlock]` — manage Context-only remote endpoints
 - `push [REMOTE] [BRANCH]` — publish an immutable Context DAG and branch tip
 - `fetch [REMOTE]` — verify objects and refresh remote-tracking refs
 - `pull [REMOTE] [BRANCH]` — fetch and fast-forward only
+- `verify [ctx_id]` — integrity (Context id, lineage, DAG refs) + secret scan
 - `network register|agents|send|inbox|accept|reply|status` — directed Agent handoffs
 
 ## Security rules (hard)

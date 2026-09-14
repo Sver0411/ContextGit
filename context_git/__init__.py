@@ -7,7 +7,7 @@ chat history.
 Standard library only. Python 3.8+. Windows / macOS / Linux.
 """
 
-__version__ = "5.0.0"
+__version__ = "5.0.1"
 
 PROTOCOL_NAME = "UACP"
 PROTOCOL_VERSION = "1.0"

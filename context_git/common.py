@@ -62,10 +62,44 @@ FORBIDDEN_SUFFIXES = frozenset(
 # Directories whose *contents* are off-limits even though the names look benign.
 FORBIDDEN_DIR_MARKERS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker"})
 
+# Editor/backup/scratch copies of a secret are still secrets. Matching is
+# suffix-first so "monkey.bak" is not swept up by a bare "key" marker.
+SECRET_BACKUP_SUFFIXES = frozenset({
+    ".bak", ".old", ".orig", ".copy", ".swp", ".swo", ".tmp", ".temp",
+    ".backup", ".save", "~",
+})
+
+SECRET_NAME_MARKERS = (
+    ".env", "secret", "credential", "password", "passwd", "token",
+    "apikey", "api_key", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "privatekey", "private_key",
+)
+
+# Case-insensitive comparisons are precomputed once. Every platform runs the
+# same rules: a case-sensitive check on POSIX would silently stop protecting
+# the moment the same tree is read on a case-preserving/case-insensitive
+# filesystem (macOS default, Windows), so the rule is normalised everywhere
+# rather than special-cased per platform.
+_CASEFOLDED_IGNORED_DIRS = frozenset(name.casefold() for name in IGNORED_DIRS)
+_CASEFOLDED_PATH_NAMES = frozenset(name.casefold() for name in FORBIDDEN_PATH_NAMES)
+_CASEFOLDED_SUFFIXES = tuple(sorted(suffix.casefold() for suffix in FORBIDDEN_SUFFIXES))
+_CASEFOLDED_DIR_MARKERS = frozenset(marker.casefold() for marker in FORBIDDEN_DIR_MARKERS)
+
+
+def normalise_path_component(name) -> str:
+    """Casefolded, trailing-dot/space-trimmed form used for all path matching.
+
+    Stripping trailing dots and spaces is a Windows filesystem semantic
+    (``.env.`` and ``.env`` name the same file there) applied on every
+    platform so the security rule cannot be defeated by moving a repository
+    between filesystems. On POSIX such names are merely unusual.
+    """
+    return str(name).casefold().rstrip(" .")
+
 
 def is_ignored_dir(name: str) -> bool:
     """True if a directory with this basename should never be walked."""
-    return name in IGNORED_DIRS
+    return normalise_path_component(name) in _CASEFOLDED_IGNORED_DIRS
 
 
 def is_forbidden_path(path) -> bool:
@@ -74,23 +108,28 @@ def is_forbidden_path(path) -> bool:
     Consulted before any read, hash, or inclusion. Deliberately conservative:
     a false positive costs one file in the report; a false negative costs
     the user a leaked credential.
+
+    Matching is case-insensitive and trailing-dot/space-insensitive on every
+    platform, so ``.ENV``, ``.SSH/config``, ``ID_RSA``, ``SECRET.PEM`` and
+    ``TOKEN.BAK`` are all refused exactly like their lowercase spellings.
     """
-    p = Path(path)
-    parts = set(p.parts)
-    if parts & FORBIDDEN_DIR_MARKERS:
-        return True
-    name = p.name
-    if name in FORBIDDEN_PATH_NAMES:
+    if path is None:
+        return False
+    p = Path(str(path))
+    for part in p.parts:
+        if normalise_path_component(part) in _CASEFOLDED_DIR_MARKERS:
+            return True
+    name = normalise_path_component(p.name)
+    if not name:
+        return False
+    if name in _CASEFOLDED_PATH_NAMES:
         return True
     if name.startswith(".env"):
         return True
-    if name.endswith(tuple(FORBIDDEN_SUFFIXES)):
+    if name.endswith(_CASEFOLDED_SUFFIXES):
         return True
-    low = name.lower()
-    if low.endswith((".bak", ".old", ".orig", ".copy", ".swp", ".tmp")):
-        for marker in (".env", "secret", "credential", "password", "token"):
-            if marker in low:
-                return True
+    if name.endswith(tuple(SECRET_BACKUP_SUFFIXES)):
+        return any(marker in name for marker in SECRET_NAME_MARKERS)
     return False
 
 

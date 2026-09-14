@@ -4,6 +4,8 @@
 
 **Git for AI Agent Context.**
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 Most handoff tools generate a document.<br>
 Context Git versions the working state itself.
 
@@ -54,6 +56,12 @@ file fingerprints) are marked `observed`; agent claims (goals, decisions)
 are marked `agent` — so the next agent knows what to re-verify instead of
 trusting a document blindly.
 
+The Context is a **navigation layer**; the live repository stays the source of
+truth for code facts. A `NONE` drift grade means the recorded *observed*
+evidence is still current on this machine — it does not promote
+agent-supplied claims into verified facts. Those keep the confidence and
+provenance they were recorded with.
+
 ## Why not just write a HANDOFF.md?
 
 | | One-shot HANDOFF.md | Context Git |
@@ -98,10 +106,11 @@ context-git merge experiment      # fast-forward or three-way semantic merge
 context-git remote add origin /path/outside/project/context-remote
 context-git push                  # publish the current Context branch
 context-git pull                  # fetch + fast-forward; never touches source Git
+context-git remote unlock         # clear a stale writer lock on a file remote
 context-git network register alice --agent codex
 context-git network send bob -m "Review the auth boundary"
 context-git network inbox         # verified handoffs addressed to this Agent
-context-git verify                # residual secret scan over the store
+context-git verify                # Context id / lineage / DAG integrity + secret scan
 context-git capabilities          # probe capabilities available in this environment
 
 # V2: private session access is always explicit
@@ -110,6 +119,12 @@ context-git import-session /path/to/session.jsonl --dry-run
 context-git import-session /path/to/session.jsonl --agent codex
 context-git import-session --latest --agent claude-code
 ```
+
+Run it from **any** directory inside the project. With no `--root`, the project
+root is the nearest ancestor holding a `.context-git/` store, otherwise the
+containing Git repository root, otherwise the working directory; an explicit
+`--root PATH` always wins. That is why `context-git init` run from
+`repo/src/auth/` writes `repo/.context-git/` rather than nesting a second store.
 
 Agents pass `--no-prompt` and fill fields with `--set KEY=VALUE`
 (repeatable; list fields accept commas; decisions accept JSON; validation
@@ -200,6 +215,15 @@ then fast-forwards only; divergent histories stay intact and require
 roots with `.` while retaining the same Context id. The manifest records a
 full SHA-256 and size for every object, and all objects, lineage, project
 identity, and residual-secret checks pass before local refs move.
+
+A file remote serialises writers by creating `.context-git.lock` with
+`O_CREAT|O_EXCL`; the lock body records pid, host, operation and timestamp.
+A writer killed mid-push leaves that file behind, so `context-git remote show`
+reports it and `context-git remote unlock REMOTE` clears it — refusing unless
+the pid is provably gone on this host. `--force` is the explicit override for
+a lock written on another host, a malformed body, or a platform where
+liveness cannot be probed. A lock is never removed for age alone: age cannot
+distinguish a slow writer from a dead one.
 
 See [`references/remote.md`](references/remote.md) for the HTTPS endpoint
 contract, concurrency rules, threat boundary, and deployment checklist.
@@ -447,6 +471,17 @@ or coupling to source Git.
 - Remote/network storage has no deletion, pruning, encryption-at-rest,
   signatures, or partial object negotiation. Fetch validates the complete
   advertised manifest (up to 10,000 objects) before moving tracking refs.
+- Legacy 8-hex Context ids stay readable and verifiable, but at 32-bit
+  strength — objects written before 5.0.1 are not rewritten in place. Local
+  verification catches corruption and casual tampering; it is not a defence
+  against an attacker who can write to the store and rewrite the declared id
+  generation at the same time.
+- A file remote's writer lock is never cleared automatically, not even when it
+  looks stale. A crashed writer needs an explicit `remote unlock`, which is
+  the deliberate trade against silently losing mutual exclusion.
+- Drift grades are computed from Git and file evidence only. Index-state-only
+  movement (`git add` with unchanged bytes) is reported at LOW and never
+  expires a recorded validation result.
 - Agent ids are authenticated only by the remote transport and its access
   control. V5 does not provide per-Agent keys, signatures, discovery across
   remotes, live messaging, task scheduling, or automatic work execution.

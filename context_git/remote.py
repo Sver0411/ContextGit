@@ -20,6 +20,8 @@ import hashlib
 import json
 import os
 import re
+import socket
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -38,10 +40,266 @@ MAX_MANIFEST_BYTES = 5 * 1024 * 1024
 MAX_NETWORK_OBJECT_BYTES = 1024 * 1024
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NETWORK_OBJECT_ID_RE = re.compile(r"^(?:hnd|rcp)_[0-9a-f]{16}$")
+LOCK_FILE_NAME = ".context-git.lock"
 
 
 class RemoteError(Exception):
     """Safe, user-facing remote protocol or transport failure."""
+
+
+# --------------------------------------------------------------------------
+# File remote writer lock
+# --------------------------------------------------------------------------
+#
+# `O_CREAT | O_EXCL` is the part that actually prevents two writers from
+# interleaving. The lock *body* exists for a different reason: a process killed
+# with SIGKILL, a crash, or a power loss leaves the file behind, and without
+# attribution every later push would fail with no way to tell a live writer
+# from a dead one. So the body records who took the lock, and `remote unlock`
+# clears it only when that question has a safe answer.
+
+def _pid_alive(pid):
+    """True/False, or None when this platform cannot answer safely.
+
+    Never probes on Windows: there ``os.kill`` maps any non-console signal to
+    ``TerminateProcess``, so a liveness probe could kill an unrelated process.
+    Returning None (unknown) makes the caller require an explicit ``--force``
+    instead, which is the fail-closed direction.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, just not ours to signal
+    except OSError:
+        return None
+    return True
+
+
+def _age_seconds(created_at):
+    if not created_at:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
+
+
+def read_lock(root):
+    """Parse the writer lock in a file remote. None when there is no lock.
+
+    Tolerates the pre-5.0.1 body (``<pid> <iso-timestamp>``) as well as the
+    current JSON body: a lock left behind by an older release still has to be
+    explained and cleared rather than silently ignored. A malformed body is
+    reported with every attribute unknown, which forces ``--force``.
+    """
+    path = Path(root) / LOCK_FILE_NAME
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+
+    info = {"raw": raw[:400], "pid": None, "host": None,
+            "operation": None, "created_at": None}
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            info["pid"] = data.get("pid")
+            info["host"] = data.get("host")
+            info["operation"] = data.get("operation")
+            info["created_at"] = data.get("created_at")
+    if info["pid"] is None:
+        head = raw.split(None, 1)
+        if head and head[0].isdigit():
+            info["pid"] = int(head[0])
+            info["created_at"] = head[1].strip() if len(head) > 1 else None
+    try:
+        info["pid"] = int(info["pid"]) if info["pid"] is not None else None
+    except (TypeError, ValueError):
+        info["pid"] = None
+    if info["pid"] is not None and info["pid"] <= 0:
+        info["pid"] = None
+    if info["host"] is not None:
+        info["host"] = str(info["host"]).strip() or None
+    if info["operation"] is not None:
+        info["operation"] = str(info["operation"]).strip() or None
+    return info
+
+
+def lock_status(root):
+    """Describe a file remote's lock, including liveness and age."""
+    info = read_lock(root)
+    if info is None:
+        return None
+    status = dict(info)
+    status["alive"] = _pid_alive(info["pid"]) if info["pid"] is not None else None
+    status["age_seconds"] = _age_seconds(info["created_at"])
+    status["same_host"] = bool(info["host"]) and info["host"] == socket.gethostname()
+    return status
+
+
+def describe_lock(status):
+    """One-line, human-readable summary of a lock status."""
+    if not status:
+        return "no lock"
+    parts = []
+    if status.get("pid") is not None:
+        parts.append("pid {}".format(status["pid"]))
+    if status.get("host"):
+        parts.append("host {}".format(status["host"]))
+    if status.get("operation"):
+        parts.append("operation {}".format(status["operation"]))
+    if status.get("created_at"):
+        parts.append("taken {}".format(status["created_at"]))
+    age = status.get("age_seconds")
+    if age is not None:
+        parts.append("age {:.0f}s".format(age))
+    alive = status.get("alive")
+    if alive is True:
+        parts.append("process alive")
+    elif alive is False:
+        parts.append("process gone")
+    else:
+        parts.append("liveness unknown")
+    return ", ".join(parts) or "unattributed lock"
+
+
+class FileRemoteLock:
+    """Single-writer lock for a file remote, with an attributable body."""
+
+    def __init__(self, root, operation):
+        self.path = Path(root) / LOCK_FILE_NAME
+        self.operation = operation
+        self._descriptor = None
+        self._held = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._held:
+            self.release()
+        return False
+
+    def acquire(self):
+        try:
+            self._descriptor = os.open(
+                str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+        except FileExistsError:
+            raise RemoteError(self._busy_message())
+        self._held = True
+        body = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "operation": self.operation,
+            "created_at": utc_now_iso(),
+        }
+        try:
+            os.write(self._descriptor, (json.dumps(body) + "\n").encode("utf-8"))
+        finally:
+            self._close()
+
+    def _close(self):
+        if self._descriptor is not None:
+            try:
+                os.close(self._descriptor)
+            except OSError:
+                pass
+            self._descriptor = None
+
+    def _busy_message(self):
+        status = lock_status(self.path.parent)
+        guidance = ("If that writer is gone, clear it deliberately with "
+                    "`context-git remote unlock REMOTE`.")
+        if not status:
+            return "remote is locked by another writer. {}".format(guidance)
+        return "remote is locked by another writer ({}). {}".format(
+            describe_lock(status), guidance)
+
+    def release(self):
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        finally:
+            self._held = False
+            self._close()
+
+
+def unlock(transport, force=False):
+    """Clear a file remote's writer lock, refusing anything still live.
+
+    Removal without ``--force`` requires all three of:
+
+    * the lock names a PID,
+    * that PID is provably gone, and
+    * the lock is attributable to this host.
+
+    Anything else — a live PID, a lock written on another host, a legacy or
+    malformed body, or a platform where liveness cannot be probed — needs an
+    explicit ``--force``. A lock is never removed just because it looks old:
+    age alone cannot distinguish a slow writer from a dead one.
+    """
+    if not isinstance(transport, FileTransport):
+        raise RemoteError("only file remotes use a local writer lock")
+    root = transport.root
+    status = lock_status(root)
+    if status is None:
+        return {"action": "unlock", "remote_root": str(root), "lock": None,
+                "removed": False, "forced": bool(force),
+                "detail": "no lock present"}
+
+    host = status.get("host")
+    pid = status.get("pid")
+    alive = status.get("alive")
+    ours = socket.gethostname()
+
+    removable_without_force = (
+        pid is not None and alive is False and (host is None or host == ours)
+    )
+    if not force and not removable_without_force:
+        if host and host != ours:
+            reason = "the lock was taken on another host ({})".format(host)
+        elif pid is None:
+            reason = "the lock cannot be attributed to a local process"
+        elif alive is True:
+            reason = "pid {} is still running".format(pid)
+        else:
+            reason = "process liveness cannot be probed on this platform"
+        raise RemoteError(
+            "refusing to clear the lock: {}. Inspect it, then pass --force only "
+            "if you are certain no writer is active.".format(reason)
+        )
+
+    lock_path = Path(root) / LOCK_FILE_NAME
+    if lock_path.is_symlink():
+        raise RemoteError("refusing to remove a symlinked lock")
+    try:
+        lock_path.unlink()
+    except OSError:
+        raise RemoteError("the lock could not be removed")
+    return {"action": "unlock", "remote_root": str(root), "lock": status,
+            "removed": True, "forced": bool(force),
+            "detail": describe_lock(status)}
 
 
 def _validate_network_object_key(kind, object_id):
@@ -362,14 +620,7 @@ class FileTransport:
         self.root.mkdir(parents=True, exist_ok=True)
         if self.contexts_dir.is_symlink() or self.manifest_path.is_symlink():
             raise RemoteError("refusing unsafe symlinks in the file remote")
-        lock_path = self.root / ".context-git.lock"
-        try:
-            descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise RemoteError("remote is locked by another writer; retry later")
-        try:
-            os.write(descriptor, "{} {}\n".format(os.getpid(), utc_now_iso()).encode("ascii"))
-            os.close(descriptor)
+        with FileRemoteLock(self.root, "push"):
             current, current_state = self.read_manifest(required=False)
             if current_state != expected_state:
                 raise RemoteError("remote changed during push; fetch and retry")
@@ -385,15 +636,6 @@ class FileTransport:
                     continue
                 write_json(target, obj)
             write_json(self.manifest_path, manifest)
-        finally:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
 
     def read_network_manifest(self, required=False):
         if self.network_manifest_path.is_symlink():
@@ -425,14 +667,7 @@ class FileTransport:
         self.root.mkdir(parents=True, exist_ok=True)
         if self.network_dir.is_symlink() or self.network_manifest_path.is_symlink():
             raise RemoteError("refusing unsafe symlinks in the network remote")
-        lock_path = self.root / ".context-git.lock"
-        try:
-            descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise RemoteError("remote is locked by another writer; retry later")
-        try:
-            os.write(descriptor, "{} {}\n".format(os.getpid(), utc_now_iso()).encode("ascii"))
-            os.close(descriptor)
+        with FileRemoteLock(self.root, "network"):
             _, current_state = self.read_network_manifest(required=False)
             if current_state != expected_state:
                 raise RemoteError("network changed during update; sync and retry")
@@ -453,15 +688,6 @@ class FileTransport:
                         continue
                     write_json(target, obj)
             write_json(self.network_manifest_path, manifest)
-        finally:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
 
 
 class _NoRedirect(request.HTTPRedirectHandler):

@@ -22,7 +22,20 @@ from pathlib import Path
 
 from .common import read_json, write_json, write_text
 
-CTX_ID_RE = re.compile(r"^ctx_[0-9a-f]{8,16}$")
+# Exactly two generations exist: the legacy 8-hex id and the 5.0.1+ 16-hex id.
+# The range form (8..16) would also admit widths no writer ever produced, so it
+# is narrowed — refusing a suspicious id is cheaper than trusting one.
+#
+# Two details matter and are easy to get wrong:
+#   * the 16 alternative comes first, or the 8 alternative would match a
+#     16-hex id's prefix;
+#   * the trailing negative lookahead forbids a hex digit after the match, so
+#     an unanchored search cannot silently return a truncated id. Without it,
+#     reading "context: ctx_67086e7f487be3cf" back out of HEAD yields
+#     "ctx_67086e7f" — an id that does not exist.
+CTX_ID_BODY = r"ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})(?![0-9a-f])"
+CTX_ID_RE = re.compile(r"^" + CTX_ID_BODY + r"$")
+CTX_ID_SEARCH_RE = re.compile(CTX_ID_BODY)
 NETWORK_ID_RE = re.compile(r"^(?:hnd|rcp)_[0-9a-f]{16}$")
 BRANCH_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -165,7 +178,7 @@ class Store:
             # The cached context line makes HEAD understandable to older tools,
             # but a present symbolic ref is authoritative even when unborn.
             return None
-        m = re.search(r"ctx_[0-9a-f]{8,16}", text or "")
+        m = CTX_ID_SEARCH_RE.search(text or "")
         return m.group(0) if m else None
 
     def set_head(self, ctx_id):
@@ -507,7 +520,15 @@ class Store:
         return ctx_id
 
     def load_context(self, ctx_id):
-        """Load a context by id. Returns None if missing/corrupt."""
+        """Load a context by id. Returns None if missing/corrupt.
+
+        Deliberately *cheap*: it establishes that the file parses, that it is a
+        JSON object, and that its declared ``context_id`` matches its file
+        name. It does not recompute the Context id, walk the DAG, or scan for
+        secrets — callers that need that (``resume``, ``verify``) use
+        :meth:`context_problems` / :meth:`verify_graph` instead, so ordinary
+        commands are not taxed by full-store verification.
+        """
         if not ctx_id:
             return None
         data = read_json(self.context_path(ctx_id))
@@ -515,6 +536,76 @@ class Store:
             # corrupt or renamed file — treat as missing
             return None
         return data
+
+    # -- integrity -------------------------------------------------------------
+
+    def context_problems(self, ctx_id, obj=None):
+        """Integrity problems for one context. Empty list means clean.
+
+        Recomputes the Context id from the object's own contents, so an edited
+        ``goal``, ``current_objective``, ``progress``, ``decisions`` or
+        ``git.head`` — the fields a reader acts on — no longer verifies. This
+        is local, structural and LLM-free, and it is deliberately the same
+        guarantee the remote transport enforces: a local Context must never be
+        *less* trusted than a fetched one.
+        """
+        from .context import verify_context_id
+
+        problems = []
+        if not ctx_id or not CTX_ID_RE.match(str(ctx_id)):
+            return ["invalid context id"]
+        if obj is None:
+            obj = self.load_context(ctx_id)
+        if obj is None:
+            return ["context object is missing, unreadable, or misnamed"]
+        if obj.get("context_id") != ctx_id:
+            problems.append(
+                "context id does not match the file name ({!r} != {!r})".format(
+                    obj.get("context_id"), ctx_id))
+        if obj.get("protocol") != "UACP":
+            problems.append("object is not a UACP Context Object")
+        if not verify_context_id(obj):
+            problems.append("Context ID does not match object contents")
+        parents = obj.get("parent_context_ids")
+        if parents is not None:
+            if not isinstance(parents, list):
+                problems.append("parent_context_ids is not a list")
+            elif len(parents) > 2 or len(set(map(str, parents))) != len(parents):
+                problems.append("parent lineage is invalid")
+            elif any(not CTX_ID_RE.match(str(p)) for p in parents):
+                problems.append("parent lineage contains an invalid context id")
+            elif parents and obj.get("parent_context_id") != parents[0]:
+                problems.append(
+                    "first-parent pointer does not match parent_context_ids")
+        elif obj.get("parent_context_id") and not CTX_ID_RE.match(
+                str(obj.get("parent_context_id"))):
+            problems.append("parent_context_id is invalid")
+        return problems
+
+    def verify_graph(self):
+        """Verify every stored context and its DAG references.
+
+        Returns ``(results, ok)`` where ``results`` maps ``ctx_id`` to a dict
+        ``{"problems": [...], "clean": bool}``. A referenced parent that is not
+        present locally is reported: the DAG claims a history the store cannot
+        produce, which is exactly the state a partial copy or a hand-deleted
+        object leaves behind.
+        """
+        results = {}
+        ok = True
+        ids = self.list_context_ids()
+        present = set(ids)
+        for ctx_id in ids:
+            obj = self.load_context(ctx_id)
+            problems = self.context_problems(ctx_id, obj)
+            if obj is not None:
+                for parent in self.parent_ids(obj):
+                    if parent not in present:
+                        problems.append("parent context is missing: {}".format(parent))
+            results[ctx_id] = {"problems": problems, "clean": not problems}
+            if problems:
+                ok = False
+        return results, ok
 
     def list_context_ids(self):
         """All context ids, oldest first."""
@@ -653,7 +744,7 @@ class Store:
                 return "branch:" + self.validate_branch_name(text[7:])
             except StoreError:
                 return None
-        m = re.search(r"ctx_[0-9a-f]{8,16}", text or "")
+        m = CTX_ID_SEARCH_RE.search(text or "")
         return "context:" + m.group(0) if m else None
 
     # -- summary for status/doctor -------------------------------------------------

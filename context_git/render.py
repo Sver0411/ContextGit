@@ -446,7 +446,7 @@ def resume_briefing(ctx, drift_report, compat, agent_adapter):
 
     if drift_report.get("recommendations"):
         L.append("")
-        L.append("Before you trust the context:")
+        L.append("Before you act on the context:")
         for r in drift_report["recommendations"][:3]:
             L.append("  - {}".format(r))
     return "\n".join(L) + "\n"

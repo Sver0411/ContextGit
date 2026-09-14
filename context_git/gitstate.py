@@ -131,24 +131,72 @@ def _parse_status_porcelain_v1(text):
     }
 
 
-def _numstat(root, args):
-    """Aggregate ``--numstat`` into {path: {additions, deletions, binary}}."""
-    ok, out, _ = _run(root, args)
-    if not ok:
-        return {}
+def parse_numstat_z(text):
+    """Parse the NUL form of ``git diff --numstat -z``.
+
+    Split out as a pure function so the parser can be exercised directly with
+    synthetic input, including the malformed and truncated shapes a real Git
+    will not produce but a corrupted pipe can. Shape:
+
+    * normal:  ``<add>\\t<del>\\t<path>\\0``
+    * rename:  ``<add>\\t<del>\\t\\0<old>\\0<new>\\0`` (path field empty)
+
+    A rename is keyed by its new path, so it aggregates as one changed file.
+    Anything unparseable is skipped rather than raising — an aggregate that
+    loses one entry is better than a snapshot that fails.
+    """
     result = {}
-    for line in _lines(out):
-        parts = line.split("\t")
+    fields = str(text).split("\0")
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        parts = entry.split("\t")
         if len(parts) < 3:
             continue
-        add, dele, path = parts[0], parts[1], "\t".join(parts[2:])
+        add, dele = parts[0], parts[1]
+        path = "\t".join(parts[2:])
+        if not path:
+            # Rename/copy: the next two NUL fields are old then new.
+            if index + 1 >= len(fields):
+                continue
+            destination = fields[index + 1]
+            index += 2
+            if not destination:
+                # A rename with no resolvable destination cannot be attributed
+                # to a file in the tree. Dropping it under-counts; inventing a
+                # key would put a path in the aggregate that Git never reported.
+                continue
+            path = destination
+        if not path:
+            continue
         binary = add == "-" or dele == "-"
+        try:
+            additions = 0 if binary else int(add or 0)
+            deletions = 0 if binary else int(dele or 0)
+        except (TypeError, ValueError):
+            binary, additions, deletions = True, 0, 0
         result[path] = {
-            "additions": 0 if binary else int(add or 0),
-            "deletions": 0 if binary else int(dele or 0),
+            "additions": additions,
+            "deletions": deletions,
             "binary": binary,
         }
     return result
+
+
+def _numstat(root, args):
+    """Aggregate ``--numstat -z`` into {path: {additions, deletions, binary}}.
+
+    The NUL form is used instead of line splitting because a path may legally
+    contain tabs, newlines, spaces and any Unicode — exactly the characters
+    that make the line form ambiguous. Aggregates only, never hunk content.
+    """
+    ok, out, _ = _run(root, args)
+    if not ok:
+        return {}
+    return parse_numstat_z(out)
 
 
 def _classify_change(path, status):
@@ -173,11 +221,21 @@ def _strip_own_store(snapshot):
 
     Contexts must not record the *names* of credential files either —
     knowing a repo has .env / id_rsa is itself unwanted metadata.
+
+    The store check looks at **every** path segment, not just the leading one:
+    a nested store (``packages/app/.context-git/``, which project-root
+    discovery deliberately supports) would otherwise leak its own HEAD,
+    HANDOFF.md and context objects into the working-tree lists. Segment
+    matching is case-normalised for the same reason as
+    :func:`context_git.common.is_forbidden_path`.
     """
-    from .common import is_forbidden_path
+    from .common import is_forbidden_path, normalise_path_component
 
     def keep(path):
-        if not path or path.startswith(".context-git/") or path.startswith(".git/"):
+        if not path:
+            return False
+        if any(normalise_path_component(part) in (".git", ".context-git")
+               for part in str(path).split("/")):
             return False
         return not is_forbidden_path(path)
 
@@ -267,8 +325,8 @@ def collect(root=".", recent_commits=8):
         snapshot = _strip_own_store(snapshot)
 
     # aggregate diff stats (never hunk content) -----------------------------------
-    staged_numstat = _numstat(root_path, ["diff", "--cached", "--numstat"])
-    unstaged_numstat = _numstat(root_path, ["diff", "--numstat"])
+    staged_numstat = _numstat(root_path, ["diff", "--cached", "--numstat", "-z"])
+    unstaged_numstat = _numstat(root_path, ["diff", "--numstat", "-z"])
     changed = sorted(
         set(snapshot["staged"]) | set(snapshot["unstaged"])
         | set(snapshot["untracked"]) | set(snapshot["conflicted"])

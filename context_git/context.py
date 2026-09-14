@@ -12,8 +12,19 @@ and the schema distinguishes them explicitly (the **Evidence Model**):
 Later agents must not mistake an agent-supplied claim for machine-verified
 fact; the drift engine downgrades validity of stale evidence accordingly.
 
-Context ids are content+lineage hashes: ``ctx_`` + 8 hex chars over
-(parent id, timestamp, repo HEAD, normalised core payload).
+Context ids are content+lineage hashes: ``ctx_`` + hex chars over
+(parents, timestamp, repo HEAD, normalised core payload).
+
+Two writer generations exist and both must keep verifying:
+
+* ``id_hash_version`` 1 (V1–V5.0.0, absent field) — ``ctx_`` + 8 hex chars.
+* ``id_hash_version`` 2 (V5.0.1+) — ``ctx_`` + 16 hex chars (64-bit truncated),
+  because 8 hex was a needless collision risk once Context DAGs became
+  long-lived and mergeable.
+
+``core_view_version`` records which core-view shape an object's id was hashed
+over, so adding the important-file fingerprint to that view could not
+invalidate any already-written object.
 """
 
 from __future__ import annotations
@@ -35,6 +46,16 @@ from .security import redact
 TOOL_NAME = "context-git"
 MAX_IMPORTANT_FILES = 20
 MIN_IMPORTANT_FILES = 5
+
+# Context-id generation written by this release.
+ID_HASH_VERSION = 2
+ID_HASH_HEX_LEN = {1: 8, 2: 16}
+ID_HASH_HEX_LEN_DEFAULT = 8  # what an object without the field was written with
+
+# Core-view shapes. Version 2 adds each important file's content fingerprint;
+# version 1 is the historical identity shape and must never change.
+CORE_VIEW_VERSION = 2
+LEGACY_CORE_VIEW_VERSION = 1
 
 ENTRYPOINT_NAMES = {
     "main.py", "app.py", "run.py", "manage.py", "cli.py", "server.py",
@@ -316,6 +337,9 @@ def build(root, notes, parent_id=None, parent_obj=None, source_agent=None,
         "protocol": "UACP",
         "protocol_version": "1.0",
         "schema_version": SCHEMA_VERSION,
+        # Declared so any later reader can reproduce this object's id exactly.
+        "core_view_version": CORE_VIEW_VERSION,
+        "id_hash_version": ID_HASH_VERSION,
         "context_id": None,           # filled below
         "parent_context_id": parent_id,
         "parent_context_ids": lineage,
@@ -543,11 +567,39 @@ def _project_name(root, detection):
 # Context id
 # --------------------------------------------------------------------------
 
-def core_view(obj):
+def core_view(obj, version=None):
     """The comparable/normalised view of a context (volatile fields removed).
 
     Used for context-id computation, empty-commit detection and diffing.
+
+    ``version`` selects the shape:
+
+    * :data:`LEGACY_CORE_VIEW_VERSION` — ``{path, why}`` per important file.
+      This is the historical identity shape; it must never change, or every
+      Context ever written would stop verifying.
+    * :data:`CORE_VIEW_VERSION` — adds the content ``fingerprint``, so a file
+      whose bytes changed is a real change even when Git's path set, status
+      and diff stat are byte-identical (``x = 1`` → ``x = 2`` → ``x = 3``).
+
+    When ``version`` is omitted the object's own declared
+    ``core_view_version`` decides (absent → legacy), which is what keeps
+    verification of older objects stable.
     """
+    if version is None:
+        try:
+            version = int(obj.get("core_view_version") or LEGACY_CORE_VIEW_VERSION)
+        except (TypeError, ValueError):
+            version = LEGACY_CORE_VIEW_VERSION
+
+    important_files = []
+    for entry in obj.get("important_files", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        item = {"path": entry.get("path"), "why": entry.get("why")}
+        if version > LEGACY_CORE_VIEW_VERSION:
+            item["fingerprint"] = entry.get("fingerprint")
+        important_files.append(item)
+
     core = {
         "goal": obj.get("goal"),
         "current_objective": obj.get("current_objective"),
@@ -557,10 +609,7 @@ def core_view(obj):
         "constraints": obj.get("constraints"),
         "do_not_change": obj.get("do_not_change"),
         "known_issues": obj.get("known_issues"),
-        "important_files": [
-            {"path": f.get("path"), "why": f.get("why")}
-            for f in obj.get("important_files", [])
-        ],
+        "important_files": important_files,
         "git": {
             "head": (obj.get("git") or {}).get("head"),
             "branch": (obj.get("git") or {}).get("branch"),
@@ -579,21 +628,34 @@ def _canonical(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _id_hex_len(payload) -> int:
+    """How many hex chars this object's id carries, per its declared writer."""
+    try:
+        generation = int(payload.get("id_hash_version") or 1)
+    except (TypeError, ValueError):
+        generation = 1
+    return ID_HASH_HEX_LEN.get(generation, ID_HASH_HEX_LEN_DEFAULT)
+
+
 def compute_context_id(payload, parent_id, parent_ids=None):
-    """ctx_<8hex> over (parents, timestamp, repo HEAD, canonical core payload).
+    """``ctx_<hex>`` over (parents, timestamp, repo HEAD, canonical core payload).
 
     Timestamp inclusion guarantees uniqueness even for identical states;
     the store also enforces uniqueness as a backstop.
+
+    The truncation width follows the object's declared ``id_hash_version``, so
+    this single function writes 16-hex ids for new objects and still
+    reproduces legacy 8-hex ids when verifying them.
     """
     h = hashlib.sha256()
     lineage = list(parent_ids) if parent_ids is not None else (
         [parent_id] if parent_id else []
     )
     h.update(_canonical(lineage or ["root"]).encode("utf-8"))
-    h.update(payload["created_at"].encode("utf-8"))
+    h.update(str(payload.get("created_at") or "").encode("utf-8"))
     h.update(((payload.get("git") or {}).get("head") or "no-git").encode("utf-8"))
     h.update(_canonical(core_view(payload)).encode("utf-8"))
-    return "ctx_" + h.hexdigest()[:8]
+    return "ctx_" + h.hexdigest()[:_id_hex_len(payload)]
 
 
 def verify_context_id(payload):
@@ -602,6 +664,10 @@ def verify_context_id(payload):
     V1/V2 hashed the scalar parent directly. V3+ objects carry
     ``parent_context_ids`` and hash the canonical parent array. Supporting
     both makes remote transport able to authenticate old immutable objects.
+
+    ``core_view_version`` and ``id_hash_version`` are read from the object
+    itself, so a 5.0.0-era object (no fields, 8 hex, no fingerprints in the
+    core view) verifies exactly as it did when written.
     """
     if not isinstance(payload, dict) or not payload.get("context_id"):
         return False
@@ -616,12 +682,22 @@ def verify_context_id(payload):
         h.update(str(payload.get("created_at") or "").encode("utf-8"))
         h.update(((payload.get("git") or {}).get("head") or "no-git").encode("utf-8"))
         h.update(_canonical(core_view(payload)).encode("utf-8"))
-        expected = "ctx_" + h.hexdigest()[:8]
+        expected = "ctx_" + h.hexdigest()[:_id_hex_len(payload)]
     return payload.get("context_id") == expected
 
 
 def is_meaningful_change(prev_obj, new_obj):
-    """True if the new context differs from its parent in any core field."""
+    """True if the new context differs from its parent in any core field.
+
+    Compared at :data:`CORE_VIEW_VERSION` for *both* sides, deliberately: a
+    5.0.0-era parent carries no ``core_view_version``, and forcing both sides
+    through the current shape is what makes "same Git status/stat, different
+    file contents" count as a change against an older parent.
+
+    This is the check that decides whether ``commit`` refuses a no-op, so it
+    must not be able to declare a real content change meaningless.
+    """
     if prev_obj is None:
         return True
-    return _canonical(core_view(prev_obj)) != _canonical(core_view(new_obj))
+    return _canonical(core_view(prev_obj, CORE_VIEW_VERSION)) != \
+        _canonical(core_view(new_obj, CORE_VIEW_VERSION))

@@ -33,12 +33,13 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import STORE_DIR, __version__
 from .common import eprint, read_json, write_text
 from .context import build as build_context, is_meaningful_change
 from .capabilities import compatibility_report, detect_agent, load_adapters
 from .diff import semantic_diff, render as render_diff
 from .drift import check as drift_check, format_report
+from .gitstate import find_repo_root
 from .merge import MergeError, merge_contexts
 from .network import (
     NetworkError, accept as network_accept, inbox as network_inbox,
@@ -47,8 +48,9 @@ from .network import (
     sent_status as network_sent_status, sync as network_sync,
 )
 from .remote import (
-    RemoteError, create_transport, fetch as remote_fetch,
-    make_remote_config, pull as remote_pull, push as remote_push,
+    FileTransport, RemoteError, create_transport, describe_lock,
+    fetch as remote_fetch, lock_status, make_remote_config,
+    pull as remote_pull, push as remote_push, unlock as remote_unlock,
 )
 from .render import handoff_md, log as render_log, resume_briefing, show as render_show
 from .security import redact, scan_object
@@ -284,6 +286,7 @@ def cmd_status(root, args):
         return 1
 
     drift = drift_check(root, ctx)
+    integrity = store.context_problems(ctx.get("context_id"), ctx)
 
     if args.json:
         print(json.dumps({
@@ -296,7 +299,11 @@ def cmd_status(root, args):
             "stale_sections": drift.get("stale_sections", []),
             "validation_freshness": drift.get("validation_freshness"),
             "recommendations": drift.get("recommendations", []),
+            "integrity": "clean" if not integrity else "failed",
+            "integrity_problems": integrity,
         }, indent=2, ensure_ascii=False))
+        if integrity:
+            return 7
         return 0 if drift["level"] == "NONE" else 3
 
     print("Context Git Status")
@@ -311,6 +318,9 @@ def cmd_status(root, args):
 
     print("  Context:         {}".format(
         "FRESH" if drift["level"] == "NONE" else "STALE"))
+    if integrity:
+        print("  Integrity:       FAILED — {}".format(integrity[0]))
+        print("                   run `context-git verify`; `resume` will refuse this object")
     if drift["level"] != "NONE":
         print("  Reason:          {}".format(drift["summary"]))
         for p in drift.get("stale_files") or []:
@@ -326,6 +336,8 @@ def cmd_status(root, args):
         if drift["level"] == "NONE"
         else "create a new context snapshot (`context-git snapshot`)."))
 
+    if integrity:
+        return 7
     return 0 if drift["level"] == "NONE" else 3
 
 
@@ -399,6 +411,18 @@ def cmd_resume(root, args):
         eprint("no context to resume ({}).".format(args.ctx_id or "HEAD is empty"))
         eprint("Run `context-git snapshot` in the source agent first.")
         return 1
+
+    # An agent is about to act on this briefing. If the object no longer
+    # matches its own id, the briefing would be a confident lie — refuse
+    # rather than hand over a plausible-looking narrative.
+    problems = store.context_problems(resolved, ctx)
+    if problems:
+        eprint("resume refused: {} failed integrity verification".format(resolved))
+        for problem in problems:
+            eprint("  - {}".format(problem))
+        eprint("Inspect the store with `context-git verify`; do not act on a "
+               "briefing built from an object that does not verify.")
+        return 7
 
     drift = drift_check(root, ctx)
     agent, how = detect_agent(getattr(args, "agent", None), root=root)
@@ -707,17 +731,47 @@ def cmd_merge(root, args):
 
 
 def cmd_verify(root, args):
-    """Second-opinion secret scan over stored contexts."""
+    """Full store verification: Context integrity plus residual secret scan.
+
+    Both questions are answered here because both mean "can this store be
+    trusted?":
+
+    * integrity — every Context Object still hashes to its own id, its parent
+      lineage is well formed, and every referenced parent exists locally
+    * secrecy — no context, network object or rendered view still looks like it
+      carries a credential
+
+    Exit codes: 0 clean, 2 a secret-looking string survived, 7 an object failed
+    integrity verification (2 wins when both are present — a live secret on
+    disk is the more urgent finding).
+    """
     store = Store(root)
-    targets = []
     if args.ctx_id:
         resolved = store.resolve(args.ctx_id)
         if resolved is None:
             eprint("unknown context or branch: {}".format(args.ctx_id))
             return 1
-        targets.append(store.context_path(resolved))
+        target_ids = [resolved]
+        results = {resolved: {"problems": store.context_problems(resolved)}}
     else:
-        targets = [store.context_path(cid) for cid in store.list_context_ids()]
+        target_ids = store.list_context_ids()
+        results, _ = store.verify_graph()
+
+    integrity_failed = False
+    if target_ids:
+        print("Context objects:")
+        for ctx_id in target_ids:
+            problems = (results.get(ctx_id) or {}).get("problems") or []
+            if problems:
+                integrity_failed = True
+                print("{}:".format(ctx_id))
+                for problem in problems:
+                    print("  ERROR {}".format(problem))
+            else:
+                print("{}: clean".format(ctx_id))
+
+    targets = [store.context_path(cid) for cid in target_ids]
+    if not args.ctx_id:
         for directory in (store.network_handoffs_dir, store.network_receipts_dir):
             if directory.is_dir() and not directory.is_symlink():
                 targets.extend(
@@ -730,28 +784,36 @@ def cmd_verify(root, args):
     if not targets:
         eprint("nothing to verify — no contexts stored.")
         return 1
-    clean = True
+
+    leaked = False
     for t in targets:
         if not t.is_file():
             eprint("missing: {}".format(t.name))
-            clean = False
+            integrity_failed = True
             continue
         try:
             text = t.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             eprint("cannot read {}: {}".format(t.name, exc))
-            clean = False
+            integrity_failed = True
             continue
         from .security import scan_text
         findings = scan_text(text)
         if findings:
-            clean = False
+            leaked = True
             print("{}: {} potential leak(s)".format(t.name, len(findings)))
             for reason, snippet in findings[:10]:
                 print("  - {}: {}".format(reason, snippet))
         else:
             print("{}: clean".format(t.name))
-    return 0 if clean else 2
+
+    if leaked:
+        return 2
+    if integrity_failed:
+        eprint("integrity verification failed — the store is not trustworthy "
+               "as-is; do not hand these objects to an agent.")
+        return 7
+    return 0
 
 
 def cmd_adapters(root, args):
@@ -898,7 +960,10 @@ def cmd_remote_show(root, args):
     store = _require_store(root)
     name, config = _select_remote(store, args.name)
     refs = store.list_remote_refs(name)
+    lock = _file_remote_lock(store, config)
     payload = {"name": name, "config": config, "tracking_refs": refs}
+    if lock is not None:
+        payload["writer_lock"] = lock
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
@@ -907,6 +972,43 @@ def cmd_remote_show(root, args):
         print("  Auth env: {}".format(config.get("auth_env") or "(none)"))
         for branch, ctx_id in refs.items():
             print("  {}/{} → {}".format(name, branch, ctx_id))
+        if lock is not None:
+            print("  Writer lock: {}".format(describe_lock(lock) if lock else "none"))
+            if lock:
+                print("               clear it with `context-git remote unlock {}`".format(name))
+    return 0
+
+
+def _file_remote_lock(store, config):
+    """Lock status for a file remote, or None for transports without one."""
+    try:
+        transport = create_transport(config, store.root)
+    except (RemoteError, StoreError):
+        return None
+    if not isinstance(transport, FileTransport):
+        return None
+    try:
+        return lock_status(transport.root)
+    except OSError:
+        return None
+
+
+def cmd_remote_unlock(root, args):
+    """Clear a stale writer lock on a file remote."""
+    store = _require_store(root)
+    name, config = _select_remote(store, args.name)
+    transport = create_transport(config, root)
+    if not isinstance(transport, FileTransport):
+        raise RemoteError("only file remotes use a local writer lock")
+    result = remote_unlock(transport, force=args.force)
+    if args.json:
+        print(json.dumps({"remote": name, **result}, indent=2, ensure_ascii=False))
+        return 0
+    if not result["removed"]:
+        print("{}: no writer lock present".format(name))
+        return 0
+    print("{}: cleared writer lock ({}){}".format(
+        name, result["detail"], " [forced]" if result["forced"] else ""))
     return 0
 
 
@@ -1430,6 +1532,15 @@ def build_parser():
     rp.add_argument("name", nargs="?", help="remote name (default: origin or only remote)")
     rp.set_defaults(func=cmd_remote_show)
 
+    rp = remote_sub.add_parser(
+        "unlock", parents=[common],
+        help="clear a stale writer lock on a file remote",
+    )
+    rp.add_argument("name", nargs="?", help="remote name (default: origin or only remote)")
+    rp.add_argument("--force", action="store_true",
+                    help="clear the lock even when its writer may still be alive")
+    rp.set_defaults(func=cmd_remote_unlock)
+
     p = sub.add_parser("push", parents=[common], help="push a Context branch to a remote")
     p.add_argument("remote", nargs="?", help="remote name (default: origin or only remote)")
     p.add_argument("branch", nargs="?", help="local context branch (default: current)")
@@ -1591,6 +1702,37 @@ def _add_snapshot_flags(p):
                    help="source agent name override (default: auto-detect)")
 
 
+def resolve_project_root(explicit=None, start=None):
+    """Resolve the project root the way the CLI advertises: run it anywhere.
+
+    Precedence, highest first:
+
+    1. an explicit ``--root PATH`` — always wins, for every command, and is
+       never overridden by discovery
+    2. the nearest ancestor of the working directory (inclusive) that contains
+       a ``.context-git/`` store — ``cd src/auth`` still resolves the project
+    3. the containing Git repository root
+    4. the working directory itself
+
+    Step 3 is what stops ``init`` from creating a nested store when it is run
+    from a subdirectory of an identified project. Discovery only ever moves
+    *upwards*, so it can never escape into an unrelated sibling tree.
+    """
+    if explicit is not None and str(explicit).strip():
+        return Path(str(explicit)).expanduser().resolve()
+    cwd = Path(start or os.getcwd()).expanduser().resolve()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / STORE_DIR).is_dir():
+            return candidate
+    repo_root = find_repo_root(cwd)
+    if repo_root is not None:
+        try:
+            return Path(repo_root).resolve()
+        except OSError:
+            pass
+    return cwd
+
+
 def _configure_stdio():
     """Make Unicode CLI output deterministic, including on Windows runners."""
     for stream in (sys.stdout, sys.stderr):
@@ -1609,7 +1751,7 @@ def main(argv=None):
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
-    root = Path(getattr(args, "root", ".")).resolve()
+    root = resolve_project_root(getattr(args, "root", None))
 
     try:
         return args.func(root, args)

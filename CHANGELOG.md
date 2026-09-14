@@ -2,6 +2,69 @@
 
 All notable changes to Context Git are documented here.
 
+## 5.0.1 — 2026-09-14
+
+Correctness, reliability, security and semantic-consistency fixes across
+V1–V5. No new capabilities, no protocol redesign, no behaviour change to the
+normal CLI flow beyond the bugs below.
+
+### Fixed
+
+- Resolve the ContextGit project root from nested working directories: an
+  explicit `--root` still wins, otherwise the nearest ancestor with a
+  `.context-git/` store, otherwise the containing Git repository root, and only
+  then the working directory. `init` from `repo/src/auth/` no longer creates a
+  second, nested store.
+- Harden forbidden-path checks against case and trailing-dot/space variants.
+  `.ENV`, `.Env`, `.SSH/config`, `.AWS/CREDENTIALS`, `ID_RSA`, `SECRET.PEM`,
+  `PRIVATE.KEY` and `TOKEN.BAK` are now refused exactly like their lowercase
+  spellings, on every platform. The tool-store prefix check (`.git/`,
+  `.context-git/`) and the ignored-directory check are normalised the same way.
+- Detect Git index-state drift such as `unstaged → staged`. Path *sets* are no
+  longer the comparison unit: each path's staged/unstaged/untracked/conflicted
+  state set is compared, so `git add` on an already-modified file is reported
+  (`index-state-changed`, graded LOW) instead of looking like no drift at all.
+  Index drift no longer expires a recorded validation result — only content
+  drift, HEAD movement and important-file fingerprint changes do.
+- Include important-file fingerprints in meaningful-change detection. A file
+  whose contents changed is now a real change even when Git's path set, status
+  and diff stat are byte-identical, so `commit` no longer reports "nothing to
+  commit" for genuine edits. The fingerprint enters the core view at
+  `core_view_version` 2 while the historical identity shape is preserved.
+- Verify local Context Object identity and DAG integrity. `load` stays cheap;
+  `verify` now checks Context id vs contents, first-parent alignment, lineage
+  shape and dangling parent references, and reports per object. `resume` fails
+  closed (exit 7) rather than emitting a briefing from an object that does not
+  verify, and `status` flags the same condition.
+- Harden `--numstat` parsing for unusual filenames by using `--numstat -z` and
+  parsing on NUL instead of splitting lines. Spaces, tabs, newlines, Unicode,
+  binary entries and renames/copies now aggregate correctly.
+- Improve stale file-remote lock recovery. The lock body records pid, host,
+  operation and timestamp; `remote show` reports it and `remote unlock REMOTE`
+  clears it — refusing unless the pid is provably gone on this host. `--force`
+  is the explicit override for another host, a malformed body, or a platform
+  where liveness cannot be probed. Locks are never removed for age alone.
+- Generate 16-hex Context IDs (`ctx_` + SHA-256 truncated to 64 bits) while
+  retaining legacy 8-hex compatibility. The writer generation is declared as
+  `id_hash_version`, so every stored object still verifies against the rule it
+  was written with. The read regex now accepts exactly 8 or 16 hex.
+- Harden `Store.load_context` to document its deliberately narrow contract and
+  keep full-store verification opt-in.
+
+### Documentation
+
+- Clarify that the Context is a navigation layer, while the live repository
+  remains the source of truth for code facts. Removed the "trust the briefing,
+  not the repo" framing, which contradicted the project's own evidence model.
+- Clarify the distinction between observed evidence and agent-supplied claims:
+  a NONE drift grade means the recorded *observed* evidence is still current on
+  this machine, not that agent claims have been verified.
+- Document project-root resolution, `verify`'s integrity scope, and stale-lock
+  recovery in `SKILL.md`.
+- Development status moved to `4 - Beta` for the first round of real-boundary
+  fixes; restore `5 - Production/Stable` once a real user project has run
+  against it.
+
 ## 5.0.0 — 2026-09-13
 
 - Added the Agent Context Network: registered Agent identities and capability

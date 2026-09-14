@@ -13,7 +13,7 @@
     "expires_at": {"oneOf": [{"type": "null"}, {"type": "string", "format": "date-time"}]},
     "from_agent": {"$ref": "#/$defs/agentId"},
     "to_agent": {"$ref": "#/$defs/agentId"},
-    "context_id": {"type": "string", "pattern": "^ctx_[0-9a-f]{8,16}$"},
+    "context_id": {"type": "string", "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$"},
     "context_branch": {
       "type": "string",
       "minLength": 1,

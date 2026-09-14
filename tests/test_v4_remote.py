@@ -57,6 +57,11 @@ class TestRemoteProtocol(TempRepoTest):
         _, obj = self._context()
         legacy = copy.deepcopy(obj)
         legacy.pop("parent_context_ids")
+        # A real V1/V2 writer emitted neither the core-view nor the id-hash
+        # generation marker; simulating one means removing both, otherwise the
+        # object is a 5.0.1 object wearing an old id and *should* be refused.
+        legacy.pop("core_view_version")
+        legacy.pop("id_hash_version")
         legacy["context_id"] = None
         h = hashlib.sha256()
         h.update(b"root")

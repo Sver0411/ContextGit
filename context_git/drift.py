@@ -16,10 +16,24 @@ It also computes:
 
 Drift levels:
     NONE    — repository matches the context's observed state
-    LOW     — untracked churn only; narrative context still trustworthy
-    MEDIUM  — HEAD moved / working tree changed; history claims stale
+    LOW     — untracked churn, or Git index-state movement only; no observed
+              evidence the context itself recorded has moved
+    MEDIUM  — HEAD moved / working tree content changed; history claims stale
     HIGH    — important files changed under the context's feet; their
               content-level claims must be re-read
+
+Drift is deliberately split into **content drift** and **index drift**:
+
+* content drift (a path entered or left the working set, HEAD moved, an
+  important file's fingerprint changed) can expire a recorded validation
+  result, because the code that was validated is no longer the code on disk;
+* index drift (``unstaged → staged`` with identical file contents) cannot —
+  it is reported at LOW and never marks validation stale.
+
+What NONE means: the machine-observable evidence the context recorded still
+matches this machine. It does **not** upgrade the agent-supplied claims in the
+context into verified facts. Observed evidence is current; `source_type:
+"agent"` claims keep the confidence and provenance they were recorded with.
 """
 
 from __future__ import annotations
@@ -30,6 +44,20 @@ from .common import fingerprint
 from .gitstate import collect as git_collect, commits_between
 
 _LEVELS = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
+# The four working-tree buckets Git reports. A path may occupy several at once
+# (staged + conflicted, for example), which is why states are modelled as a
+# set per path rather than a single label.
+_WORKING_STATE_KEYS = ("staged", "unstaged", "untracked", "conflicted")
+
+
+def _working_states(working_tree):
+    """Map ``path -> {state, ...}`` across staged/unstaged/untracked/conflicted."""
+    states = {}
+    for key in _WORKING_STATE_KEYS:
+        for path in (working_tree or {}).get(key) or []:
+            states.setdefault(path, set()).add(key)
+    return states
 
 
 class Report(dict):
@@ -62,6 +90,7 @@ def check(root, ctx_obj, live=None):
         "counts": {
             "commits_since": 0,
             "working_tree_changed": 0,
+            "index_state_changed": 0,
             "important_files_changed": 0,
             "new_untracked": 0,
         },
@@ -152,22 +181,66 @@ def check(root, ctx_obj, live=None):
             report["stale_sections"].append("architecture")
 
     # -- 4. working tree change set -------------------------------------------------
+    #
+    # Path *sets* are not enough. `git add auth.py` on an already-modified file
+    # leaves "old ∪ new paths" identical while Git's index state genuinely
+    # moved, so the pre-5.0.1 comparison reported no drift at all. Compare the
+    # per-path state set instead, and keep the two failure modes apart:
+    #
+    # * content drift — a path entered or left the working set. What the
+    #   context describes is no longer on disk, so recorded validation results
+    #   may have expired.
+    # * index drift   — same paths, same contents, different Git index bucket.
+    #   Reported and graded, but it must never mark validation stale.
     old_wt = ctx_git.get("working_tree") or {}
-    old_set = set(old_wt.get("staged") or []) | set(old_wt.get("unstaged") or []) \
-        | set(old_wt.get("untracked") or [])
-    new_set = set(live.get("staged") or []) | set(live.get("unstaged") or []) \
-        | set(live.get("untracked") or [])
-    delta = old_set ^ new_set
-    report["counts"]["working_tree_changed"] = len(delta)
-    if delta:
+    old_states = _working_states(old_wt)
+    new_states = _working_states(live)
+    entered = sorted(set(new_states) - set(old_states))
+    left = sorted(set(old_states) - set(new_states))
+    restated = sorted(
+        path for path in set(old_states) & set(new_states)
+        if old_states[path] != new_states[path]
+    )
+    report["counts"]["working_tree_changed"] = len(entered) + len(left)
+    report["counts"]["index_state_changed"] = len(restated)
+
+    if entered or left:
         new_untracked = set(live.get("untracked") or []) - set(old_wt.get("untracked") or [])
         report["counts"]["new_untracked"] = len(new_untracked)
-        lvl = "LOW" if new_untracked and not (old_set ^ new_set) - new_untracked else "MEDIUM"
+        only_new_untracked = (
+            bool(new_untracked)
+            and set(entered) <= new_untracked
+            and not left
+            and not restated
+        )
         signals.append({
             "kind": "working-tree-changed",
-            "level": lvl,
-            "detail": "{} path(s) in play now were not at snapshot time".format(len(delta)),
-            "paths": sorted(delta)[:20],
+            "level": "LOW" if only_new_untracked else "MEDIUM",
+            "detail": "{} path(s) entered or left the working set since snapshot".format(
+                len(entered) + len(left)),
+            "paths": sorted(set(entered) | set(left))[:20],
+        })
+        report["stale_sections"].append("git.working_tree")
+
+    if restated:
+        def _describe(path):
+            return "{}: {} → {}".format(
+                path,
+                "+".join(sorted(old_states[path])),
+                "+".join(sorted(new_states[path])),
+            )
+
+        signals.append({
+            "kind": "index-state-changed",
+            "level": "LOW",
+            "detail": "{} path(s) changed Git index state; file contents unchanged ({})".format(
+                len(restated), "; ".join(_describe(p) for p in restated[:3])),
+            "paths": restated[:20],
+            "transitions": [
+                {"path": path, "from": sorted(old_states[path]),
+                 "to": sorted(new_states[path])}
+                for path in restated[:20]
+            ],
         })
         report["stale_sections"].append("git.working_tree")
 
@@ -175,6 +248,8 @@ def check(root, ctx_obj, live=None):
     val = ctx_obj.get("validation") or {}
     if val.get("observed_at") and val.get("freshness") != "stale":
         # If code changed after validation was recorded, the result may no longer hold.
+        # Index-state-only drift is excluded on purpose: `git add` does not
+        # change the bytes that were built or tested.
         code_changed = bool(stale_files) or bool(
             report["counts"]["commits_since"] or report["counts"]["working_tree_changed"]
         )
@@ -211,8 +286,10 @@ def check(root, ctx_obj, live=None):
     ) if signals else "NONE"
 
     if not signals:
-        report["summary"] = ("No drift — repository matches the context's observed state. "
-                             "Context can be trusted as-is.")
+        report["summary"] = (
+            "No drift — observed repository evidence is current. Agent-supplied "
+            "claims retain their recorded confidence and provenance."
+        )
     else:
         parts = ["{}: {}".format(s["kind"], s["detail"]) for s in signals]
         report["summary"] = " · ".join(parts)
@@ -255,7 +332,10 @@ def format_report(report):
     if report.get("recommendations"):
         for r in report["recommendations"][:4]:
             L.append("  → {}".format(r))
-    L.append("  Verdict: {}".format(
-        "context trustworthy" if report["level"] in ("NONE", "LOW")
-        else "re-verify stale sections before trusting them"))
+    if report["level"] in ("NONE", "LOW"):
+        verdict = "observed evidence is current; agent claims keep their recorded provenance"
+    else:
+        verdict = ("re-verify the flagged sections — the live repository is the "
+                   "source of truth for code facts")
+    L.append("  Verdict: {}".format(verdict))
     return "\n".join(L)

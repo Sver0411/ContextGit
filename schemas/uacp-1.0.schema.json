@@ -36,13 +36,23 @@
     },
     "context_id": {
       "type": "string",
-      "pattern": "^ctx_[0-9a-f]{8,16}$",
-      "description": "Stable identifier: sha256(parent ids, created_at, repo HEAD, canonical core payload), truncated to 8 hex chars, prefixed ctx_."
+      "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$",
+      "description": "Stable identifier: sha256(lineage, created_at, repo HEAD, canonical core payload), truncated to 8 hex chars before 5.0.1 and 16 hex chars (64-bit) from 5.0.1 on, prefixed ctx_. Both widths are valid; id_hash_version declares which one this object carries."
+    },
+    "id_hash_version": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "Which id generation wrote this object. 1 (or absent, V1-V5.0.0) = 8 hex chars; 2 (V5.0.1+) = 16. Readers must reproduce the id at the width declared here, so an object cannot be downgraded by shortening its id."
+    },
+    "core_view_version": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "Which normalised core view this object's id was hashed over. 1 (or absent) = path+why per important file; 2 = adds each important file's fingerprint so a content-only change is a real change. Absent means 1, which is what keeps pre-5.0.1 objects verifying."
     },
     "parent_context_id": {
       "oneOf": [
         { "type": "null" },
-        { "type": "string", "pattern": "^ctx_[0-9a-f]{8,16}$" }
+        { "type": "string", "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$" }
       ],
       "description": "First parent for UACP/1.0 readers. Null for a root context. In a V3 merge this is parent_context_ids[0]."
     },
@@ -50,7 +60,7 @@
       "type": "array",
       "maxItems": 2,
       "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^ctx_[0-9a-f]{8,16}$" },
+      "items": { "type": "string", "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$" },
       "description": "V3 additive DAG lineage. Empty for roots, one id for ordinary commits, and [ours, theirs] for merge contexts. Older readers use parent_context_id."
     },
     "context_branch": {
@@ -337,11 +347,11 @@
               "properties": {
                 "base_context_id": {
                   "type": ["string", "null"],
-                  "pattern": "^ctx_[0-9a-f]{8,16}$"
+                  "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$"
                 },
                 "source_context_id": {
                   "type": "string",
-                  "pattern": "^ctx_[0-9a-f]{8,16}$"
+                  "pattern": "^ctx_(?:[0-9a-f]{16}|[0-9a-f]{8})$"
                 },
                 "source_ref": { "type": ["string", "null"] },
                 "strategy": { "const": "three-way" },
