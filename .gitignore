@@ -9,4 +9,5 @@ dist/
 .venv/
 venv/
 .context-git/
+.workbuddy/
 .DS_Store
